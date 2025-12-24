@@ -10,26 +10,24 @@ CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
-# Configuration
-EXTERNAL_EDNS_SIZE=512
-INTERNAL_EDNS_SIZE=1232
-EDNS_PROXY_PORT=53
-SLOWDNS_PORT=53  # CHANGED: SlowDNS now runs on port 53
+# SSH Port Configuration
+SSHD_PORT=22  # OpenSSH on standard port 22
+SLOWDNS_PORT=5300  # SlowDNS runs on port 5300
 
 # Title Function
 print_title() {
     clear
     echo ""
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${WHITE}   E D N S   P R O X Y   I N S T A L L A T I O N${NC}"
+    echo -e "${WHITE}   S L O W D N S   O P E N S S H${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${YELLOW}   Bypass MTU 512 for SlowDNS (512 → $INTERNAL_EDNS_SIZE)${NC}"
+    echo -e "${YELLOW}   Complete Installation Script${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
     echo ""
 }
 
 print() {
-    echo -e "${GREEN}[^]${NC} $1"
+    echo -e "${BLUE}[*]${NC} $1"
 }
 
 print_success() {
@@ -44,430 +42,250 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
 }
 
-# Check root
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}Please run as root: sudo bash $0${NC}"
-        exit 1
-    fi
-}
-
-# Check if SlowDNS is running
-check_slowdns() {
-    print "Checking if SlowDNS is running on port $SLOWDNS_PORT..."
-    if ss -ulpn | grep -q ":$SLOWDNS_PORT"; then
-        print_success "SlowDNS found running on port $SLOWDNS_PORT"
-        return 0
-    else
-        print_error "SlowDNS not found on port $SLOWDNS_PORT"
-        echo ""
-        echo -e "${YELLOW}Note: This EDNS Proxy requires SlowDNS to be running first.${NC}"
-        echo -e "${YELLOW}Please install and start SlowDNS before running this script.${NC}"
-        echo ""
-        exit 1
-    fi
-}
-
-# SAFE: Stop DNS services without killing the script
-safe_stop_dns() {
-    print "Stopping existing DNS services on port 53..."
-    
-    # 1. Stop systemd-resolved if running
-    if systemctl is-active --quiet systemd-resolved; then
-        print "Stopping systemd-resolved..."
-        systemctl stop systemd-resolved
-        sleep 1
-    fi
-    
-    # 2. Disable systemd-resolved from starting on boot
-    systemctl disable systemd-resolved 2>/dev/null
-    
-    # 3. Check what's on port 53 without killing
-    print "Checking what's using port 53..."
-    local port_users=$(ss -tulpn | grep ':53 ' | head -5)
-    if [ -n "$port_users" ]; then
-        print_warning "Port 53 is currently in use by:"
-        echo "$port_users" | while read line; do
-            echo "   $line"
-        done
-        
-        # Ask user for confirmation
-        echo ""
-        read -p "Continue and stop these services? (y/n): " -n 1 -r
-        echo ""
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            print_error "Installation aborted by user"
-            exit 1
-        fi
-        
-        # Gracefully stop services by service name
-        print "Stopping services gracefully..."
-        
-        # Try to stop by service name first
-        if systemctl list-units --type=service | grep -q "dnsmasq"; then
-            systemctl stop dnsmasq 2>/dev/null
-        fi
-        
-        if systemctl list-units --type=service | grep -q "bind9"; then
-            systemctl stop bind9 2>/dev/null
-        fi
-        
-        if systemctl list-units --type=service | grep -q "named"; then
-            systemctl stop named 2>/dev/null
-        fi
-        
-        sleep 2
-        
-        # If still in use, use fuser to free the port (safer than pkill)
-        if ss -tulpn | grep -q ':53 '; then
-            print "Freeing port 53 using fuser..."
-            fuser -k 53/udp 2>/dev/null || true
-            fuser -k 53/tcp 2>/dev/null || true
-            sleep 2
-        fi
-    fi
-    
-    print_success "Port 53 prepared for EDNS Proxy"
-}
-
 # Show title
 clear
-check_root
 print_title
-print "Starting EDNS Proxy Installation..."
-echo ""
 
-# Check prerequisites
-check_slowdns
-
-# Install Python3 if not present
-print "Checking for Python3..."
-if ! command -v python3 &> /dev/null; then
-    print "Python3 not found, installing..."
-    apt-get update > /dev/null 2>&1
-    apt-get install -y python3 > /dev/null 2>&1
-    print_success "Python3 installed"
-else
-    print_success "Python3 already installed"
+# Get Server IP
+SERVER_IP=$(curl -s ifconfig.me)
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# Create EDNS Proxy Python script (converts 512 to 1232)
-print "Creating EDNS Proxy Python script..."
+# ====================================================
+# INSTALLATION PROCESS
+# ====================================================
 
-# CHANGED: EDNS Proxy now runs on port 5353 and forwards to port 53
-cat > /usr/local/bin/edns-proxy.py << 'EOF'
-#!/usr/bin/env python3
-"""
-EDNS Proxy for SlowDNS (smart parser)
-- Listens on UDP :5353 (proxy port)
-- Forwards to 127.0.0.1:53 (SlowDNS server) with bigger EDNS size
-- Outside sees 512, inside server sees 1232
-"""
+print "Starting OpenSSH SlowDNS Installation..."
+echo ""
 
-import socket
-import threading
-import struct
+# Disable UFW
+print "Disabling UFW..."
+sudo ufw disable 2>/dev/null
+if systemctl is-active --quiet ufw; then
+    sudo systemctl stop ufw
+fi
+systemctl disable ufw 2>/dev/null
+print_success "UFW disabled"
 
-# Public listen - changed to 5353 to avoid conflict
-LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = 5353
+# Disable systemd-resolved
+print "Disabling systemd-resolved..."
+if systemctl is-active --quiet systemd-resolved; then
+    systemctl stop systemd-resolved
+fi
+systemctl disable systemd-resolved 2>/dev/null
+print_success "systemd-resolved disabled"
 
-# Internal SlowDNS server address - changed to port 53
-UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = 53
+# DNS config
+print "Configuring DNS..."
+if [ -L /etc/resolv.conf ]; then
+    rm -f /etc/resolv.conf
+fi
+echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
+chattr +i /etc/resolv.conf 2>/dev/null
+print_success "DNS configured"
 
-# EDNS sizes
-EXTERNAL_EDNS_SIZE = 512    # what we show to clients
-INTERNAL_EDNS_SIZE = 1232   # what we tell SlowDNS internally
-
-def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
-    """
-    Parse DNS message properly and patch EDNS (OPT RR) UDP payload size.
-    If no EDNS / cannot parse properly → return data as is.
-    """
-    if len(data) < 12:
-        return data
-    
-    try:
-        # Header: ID(2), FLAGS(2), QDCOUNT(2), ANCOUNT(2), NSCOUNT(2), ARCOUNT(2)
-        qdcount, ancount, nscount, arcount = struct.unpack("!HHHH", data[4:12])
-    except struct.error:
-        return data
-    
-    offset = 12
-    
-    def skip_name(buf, off):
-        """Skip DNS name (supporting compression)."""
-        while True:
-            if off >= len(buf):
-                return len(buf)
-            l = buf[off]
-            off += 1
-            if l == 0:
-                break
-            if l & 0xC0 == 0xC0:  # compression pointer, one more byte
-                if off >= len(buf):
-                    return len(buf)
-                off += 1
-                break
-            off += l
-        return off
-    
-    # Skip Questions
-    for _ in range(qdcount):
-        offset = skip_name(data, offset)
-        if offset + 4 > len(data):
-            return data
-        offset += 4  # QTYPE + QCLASS
-    
-    def skip_rrs(count, buf, off):
-        """Skip Resource Records (Answer + Authority)."""
-        for _ in range(count):
-            off = skip_name(buf, off)
-            if off + 10 > len(buf):
-                return len(buf)
-            # TYPE(2) + CLASS(2) + TTL(4) + RDLEN(2)
-            rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", buf[off:off+10])
-            off += 10
-            if off + rdlen > len(buf):
-                return len(buf)
-            off += rdlen
-        return off
-    
-    # Skip Answer + Authority
-    offset = skip_rrs(ancount, data, offset)
-    offset = skip_rrs(nscount, data, offset)
-    
-    # Additional section → EDNS OPT RR is here
-    new_data = bytearray(data)
-    for _ in range(arcount):
-        rr_name_start = offset
-        offset = skip_name(data, offset)
-        if offset + 10 > len(data):
-            return data
-        rtype = struct.unpack("!H", data[offset:offset+2])[0]
-        if rtype == 41:  # OPT RR (EDNS)
-            # UDP payload size is 2 bytes after TYPE
-            size_bytes = struct.pack("!H", new_size)
-            new_data[offset+2:offset+4] = size_bytes
-            return bytes(new_data)
-        # Skip CLASS(2) + TTL(4) + RDLEN(2) + RDATA
-        _, _, rdlen = struct.unpack("!H I H", data[offset+2:offset+10])
-        offset += 10 + rdlen
-    
-    return data
-
-def handle_request(server_sock: socket.socket, data: bytes, client_addr):
-    """
-    - patch EDNS size to INTERNAL_EDNS_SIZE for request
-    - send to upstream (SlowDNS:53)
-    - receive response, patch EDNS size to EXTERNAL_EDNS_SIZE
-    - return to client
-    """
-    upstream_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    upstream_sock.settimeout(5.0)
-    
-    try:
-        upstream_data = patch_edns_udp_size(data, INTERNAL_EDNS_SIZE)
-        upstream_sock.sendto(upstream_data, (UPSTREAM_HOST, UPSTREAM_PORT))
-        resp, _ = upstream_sock.recvfrom(4096)
-        resp_patched = patch_edns_udp_size(resp, EXTERNAL_EDNS_SIZE)
-        server_sock.sendto(resp_patched, client_addr)
-    except socket.timeout:
-        # client will resend, no need to kill proxy
-        pass
-    except Exception:
-        # stay calm, don't crash proxy
-        pass
-    finally:
-        upstream_sock.close()
-
-def main():
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server_sock.bind((LISTEN_HOST, LISTEN_PORT))
-    
-    print(f"[EDNS Proxy] Listening on {LISTEN_HOST}:{LISTEN_PORT}, "
-          f"upstream {UPSTREAM_HOST}:{UPSTREAM_PORT}, "
-          f"external EDNS={EXTERNAL_EDNS_SIZE}, internal EDNS={INTERNAL_EDNS_SIZE}")
-    
-    while True:
-        data, client_addr = server_sock.recvfrom(4096)
-        t = threading.Thread(
-            target=handle_request,
-            args=(server_sock, data, client_addr),
-            daemon=True,
-        )
-        t.start()
-
-if __name__ == "__main__":
-    main()
+# Configure OpenSSH
+print "Configuring OpenSSH on port $SSHD_PORT..."
+cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
+cat > /etc/ssh/sshd_config << EOF
+# OpenSSH Configuration - Standard Port 22
+Port $SSHD_PORT
+Protocol 2
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+AllowTcpForwarding yes
+GatewayPorts yes
+Compression delayed
+Subsystem sftp /usr/lib/openssh/sftp-server
+MaxSessions 100
+MaxStartups 100:30:200
+LoginGraceTime 30
+UseDNS no
 EOF
+systemctl restart sshd
+sleep 2
+print_success "OpenSSH configured on port $SSHD_PORT"
 
-chmod +x /usr/local/bin/edns-proxy.py
-print_success "EDNS Proxy Python script created"
+# Setup SlowDNS
+print "Setting up SlowDNS..."
+rm -rf /etc/slowdns
+mkdir -p /etc/slowdns
+print_success "SlowDNS directory created"
 
-# Create systemd service for EDNS Proxy
-print "Creating EDNS Proxy service..."
-cat > /etc/systemd/system/edns-proxy.service << EOF
+# Download files
+print "Downloading SlowDNS files..."
+
+wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
+if [ $? -eq 0 ]; then
+    print_success "✓ server.key downloaded"
+else
+    print "Trying alternative URL..."
+    wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/server.key"
+    print_success "✓ server.key downloaded"
+fi
+
+wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
+if [ $? -eq 0 ]; then
+    print_success "✓ server.pub downloaded"
+else
+    print "Trying alternative URL..."
+    wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/server.pub"
+    print_success "✓ server.pub downloaded"
+fi
+
+wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
+if [ $? -eq 0 ]; then
+    print_success "✓ sldns-server downloaded"
+else
+    print "Trying alternative URL..."
+    wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
+    print_success "✓ sldns-server downloaded"
+fi
+
+chmod +x /etc/slowdns/sldns-server
+print_success "File permissions set"
+
+# Get nameserver
+echo ""
+echo -e "${CYAN}[ NAMESERVER SETUP ]${NC}"
+echo -e "${WHITE}────────────────────────────────────────────────────────────────${NC}"
+read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
+echo ""
+
+# Create SlowDNS service
+print "Creating SlowDNS service..."
+cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
-Description=EDNS Proxy (Port 5353→53, $EXTERNAL_EDNS_SIZE↔$INTERNAL_EDNS_SIZE)
-After=network.target
-Wants=slowdns-server.service
+Description=SlowDNS Server
+After=network.target sshd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/edns-proxy.py
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
 Restart=always
-RestartSec=3
+RestartSec=5
 User=root
-LimitNOFILE=65536
-Environment="PYTHONUNBUFFERED=1"
-StandardOutput=append:/var/log/edns-proxy.log
-StandardError=append:/var/log/edns-proxy.error
 
 [Install]
 WantedBy=multi-user.target
 EOF
+print_success "Service file created"
 
-print_success "EDNS Proxy service created"
+# Startup config
+print "Setting up startup configuration..."
+cat > /etc/rc.local <<-END
+#!/bin/sh -e
+systemctl start sshd
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
+iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300
+iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300 TCP
+iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
+iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
+iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -j ACCEPT
+iptables -A INPUT -m state --state INVALID -j DROP
+iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
+sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
+exit 0
+END
+chmod +x /etc/rc.local
+systemctl enable rc-local > /dev/null 2>&1
+systemctl start rc-local.service > /dev/null 2>&1
+print_success "Startup configuration set"
 
-# SAFELY stop DNS services
-safe_stop_dns
+# Disable IPv6
+print "Disabling IPv6..."
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1
+echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
+echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf
+sysctl -p > /dev/null 2>&1
+print_success "IPv6 disabled"
 
-# Update firewall for EDNS Proxy
-print "Configuring firewall rules..."
-iptables -F 2>/dev/null
-iptables -t nat -F 2>/dev/null
-
-# Allow SlowDNS on port 53
-iptables -A INPUT -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -p tcp --dport 53 -j ACCEPT
-
-# Allow EDNS Proxy on port 5353
-iptables -A INPUT -p udp --dport 5353 -j ACCEPT
-iptables -A INPUT -p tcp --dport 5353 -j ACCEPT
-
-# Redirect DNS queries to EDNS Proxy on port 5353
-iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353
-iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5353
-
-# Also redirect local queries
-iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 --dport 53 -j REDIRECT --to-ports 5353
-
-print_success "Firewall configured"
-
-# Start EDNS Proxy service
-print "Starting EDNS Proxy service..."
+# Start SlowDNS service
+print "Starting SlowDNS service..."
+pkill sldns-server 2>/dev/null
 systemctl daemon-reload
-systemctl enable edns-proxy.service > /dev/null 2>&1
-systemctl start edns-proxy.service
+systemctl enable server-sldns > /dev/null 2>&1
+systemctl start server-sldns
 sleep 3
 
-# Test EDNS Proxy
-print "Testing EDNS Proxy..."
-sleep 2
-
-print "Testing port 5353 (EDNS Proxy)..."
-if ss -ulpn | grep -q ":5353"; then
-    print_success "EDNS Proxy listening on port 5353"
+if systemctl is-active --quiet server-sldns; then
+    print_success "SlowDNS service started"
     
-    print "Testing port 53 (SlowDNS)..."
-    if ss -ulpn | grep -q ":53"; then
-        print_success "SlowDNS listening on port 53"
-        
-        # Test with a DNS query
-        print "Testing DNS query..."
-        if timeout 3 dig @127.0.0.1 google.com +short > /dev/null 2>&1; then
-            print_success "DNS query successful"
-        else
-            print_warning "DNS query test inconclusive"
-            print "Testing direct connection to port 5353..."
-            if timeout 3 dig @127.0.0.1 -p 5353 google.com +short > /dev/null 2>&1; then
-                print_success "Direct connection to EDNS Proxy works"
-            fi
-        fi
+    # Test DNS functionality
+    print "Testing DNS functionality..."
+    sleep 2
+    # Test with port 5300 explicitly
+    if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
+        print_success "SlowDNS is listening on port $SLOWDNS_PORT"
     else
-        print_error "SlowDNS not listening on port 53"
+        print_warning "SlowDNS not responding on port $SLOWDNS_PORT"
+        systemctl status server-sldns --no-pager
     fi
 else
-    print_warning "EDNS Proxy not listening on port 5353"
-    
-    # Try alternative method
-    print "Trying alternative startup method..."
-    
-    # Check if it's a permission issue
-    if [ "$(id -u)" != "0" ]; then
-        print_error "Must be run as root for port 5353"
-    fi
-    
-    # Try to start manually
-    print "Starting EDNS Proxy manually..."
-    nohup /usr/bin/python3 /usr/local/bin/edns-proxy.py > /tmp/edns-debug.log 2>&1 &
-    sleep 3
-    
-    if ss -ulpn | grep -q ":5353"; then
-        print_success "EDNS Proxy started manually"
-        echo "Check /tmp/edns-debug.log for details"
+    print_error "SlowDNS service failed to start"
+    systemctl status server-sldns --no-pager
+    # Try direct start as fallback
+    pkill sldns-server 2>/dev/null
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    sleep 2
+    if pgrep -x "sldns-server" > /dev/null; then
+        print_success "SlowDNS started directly"
     else
-        print_error "Failed to start EDNS Proxy"
-        echo "Check /tmp/edns-debug.log for error details"
+        print_error "Failed to start SlowDNS"
     fi
 fi
 
-# Create status script
-cat > /usr/local/bin/edns-status << 'EOF'
-#!/bin/bash
-echo "=== EDNS Proxy Status ==="
-echo ""
-echo "Service Status:"
-systemctl status edns-proxy --no-pager | grep "Active:" | sed 's/^/ /'
-echo ""
-echo "Port Status:"
-echo "  Port 5353 (EDNS Proxy):"
-ss -ulpn | grep ":5353" | sed 's/^/ /'
-echo "  Port 53 (SlowDNS):"
-ss -ulpn | grep ":53" | sed 's/^/ /'
-echo ""
-echo "Recent Logs:"
-journalctl -u edns-proxy.service -n 5 --no-pager 2>/dev/null | tail -5 | sed 's/^/ /'
-EOF
+# Clean up
+print "Cleaning up packages..."
+sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
+print_success "Packages cleaned"
 
-chmod +x /usr/local/bin/edns-status
-print_success "Status script created: edns-status"
-
-# Create simple test command
-cat > /usr/local/bin/test-edns << 'EOF'
-#!/bin/bash
-echo "Testing EDNS Proxy..."
-echo "Running: dig @127.0.0.1 google.com"
-dig @127.0.0.1 google.com +short
-echo ""
-echo "Running: dig @127.0.0.1 -p 5353 google.com"
-dig @127.0.0.1 -p 5353 google.com +short
-EOF
-
-chmod +x /usr/local/bin/test-edns
-print_success "Test command created: test-edns"
+# Test connection
+print "Testing SSH connection..."
+if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$SSHD_PORT" 2>/dev/null; then
+    print_success "SSH port $SSHD_PORT is accessible"
+else
+    print_error "SSH port $SSHD_PORT is not accessible"
+fi
 
 echo ""
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-print_success "EDNS Proxy Installation Completed!"
+print_success "OpenSSH SlowDNS Installation Completed!"
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
 echo ""
-echo -e "${YELLOW}Quick Test Commands:${NC}"
-echo "  edns-status      # Check EDNS Proxy status"
-echo "  test-edns        # Test DNS resolution"
-echo "  dig @127.0.0.1 google.com          # Manual DNS test (goes through proxy)"
-echo "  dig @127.0.0.1 -p 5353 google.com  # Direct EDNS Proxy test"
+echo -e "${YELLOW}Important Note:${NC}"
+echo "SlowDNS is running on port $SLOWDNS_PORT (not 53)"
+echo "To test SlowDNS, you need to use:"
+echo "  dig @127.0.0.1 -p $SLOWDNS_PORT google.com"
 echo ""
-echo -e "${YELLOW}Architecture:${NC}"
-echo "  SlowDNS runs on port 53"
-echo "  EDNS Proxy runs on port 5353"
-echo "  All DNS queries to port 53 are redirected to 5353"
-echo "  EDNS Proxy converts EDNS size 512 → 1232 for SlowDNS"
-echo ""
-echo -e "${YELLOW}If port 53 is still in use, try:${NC}"
-echo "  sudo systemctl stop systemd-resolved"
-echo "  sudo fuser -k 53/udp"
-echo "  sudo systemctl restart edns-proxy"
+echo "To make SlowDNS work on port 53, you need to:"
+echo "1. Install EDNS Proxy (separate script)"
+echo "2. Or use iptables to redirect port 53 to $SLOWDNS_PORT"
 echo ""
