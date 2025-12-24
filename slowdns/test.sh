@@ -12,7 +12,7 @@ NC='\033[0m'
 
 # SSH Port Configuration
 SSHD_PORT=22  # OpenSSH on standard port 22
-SLOWDNS_PORT=5300
+SLOWDNS_PORT=53  # CHANGED: Use standard DNS port 53 instead of 5300
 
 # Title Function
 print_title() {
@@ -81,7 +81,7 @@ print "Configuring DNS..."
 if [ -L /etc/resolv.conf ]; then
     rm -f /etc/resolv.conf
 fi
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
+echo -e "nameserver 127.0.0.1\nnameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
 chattr +i /etc/resolv.conf 2>/dev/null
 print_success "DNS configured"
 
@@ -182,7 +182,7 @@ WantedBy=multi-user.target
 EOF
 print_success "Service file created"
 
-# Startup config (WITHOUT iptables DNS redirection)
+# Startup config
 print "Setting up startup configuration..."
 cat > /etc/rc.local <<-END
 #!/bin/sh -e
@@ -198,9 +198,8 @@ iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
-iptables -A INPUT -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
+iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT  # Port 53
+iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT  # Port 53 TCP
 iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
 iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
 iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
@@ -238,13 +237,34 @@ sleep 3
 
 if systemctl is-active --quiet server-sldns; then
     print_success "SlowDNS service started"
+    
+    # Test DNS functionality
+    print "Testing DNS functionality..."
+    sleep 2
+    if dig @127.0.0.1 google.com +short +time=2 +tries=2 > /dev/null 2>&1; then
+        print_success "DNS is working correctly"
+    else
+        print_warning "DNS test failed. Checking service..."
+        systemctl status server-sldns --no-pager
+        # Try direct start as fallback
+        pkill sldns-server 2>/dev/null
+        /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+        sleep 2
+        if pgrep -x "sldns-server" > /dev/null; then
+            print_success "SlowDNS started directly"
+        fi
+    fi
 else
+    print_error "SlowDNS service failed to start"
+    systemctl status server-sldns --no-pager
     # Try direct start as fallback
     pkill sldns-server 2>/dev/null
     /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
     sleep 2
     if pgrep -x "sldns-server" > /dev/null; then
         print_success "SlowDNS started directly"
+    else
+        print_error "Failed to start SlowDNS"
     fi
 fi
 
