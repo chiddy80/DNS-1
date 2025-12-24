@@ -12,15 +12,17 @@ NC='\033[0m'
 
 # SSH Port Configuration
 SSHD_PORT=22  # OpenSSH on standard port 22
+SLOWDNS_PORT=5300  # SlowDNS runs on port 5300
+MTU_SIZE=1452  # MAXIMUM PERFORMANCE MTU
 
 # Title Function
 print_title() {
     clear
     echo ""
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${WHITE}   S L O W D N S   O P E N S S H${NC}"
+    echo -e "${WHITE} S L O W D N S   O P E N S S H${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${YELLOW}   Complete Installation Script${NC}"
+    echo -e "${YELLOW} Complete Installation Script${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
     echo ""
 }
@@ -162,7 +164,7 @@ echo -e "${WHITE}─────────────────────
 read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
 echo ""
 
-# Create SlowDNS service
+# Create SlowDNS service with MTU 1452
 print "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
@@ -171,7 +173,7 @@ After=network.target sshd.service
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :5300 -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu $MTU_SIZE -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
 Restart=always
 RestartSec=5
 User=root
@@ -186,9 +188,27 @@ print "Setting up startup configuration..."
 cat > /etc/rc.local <<-END
 #!/bin/sh -e
 systemctl start sshd
-iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-iptables -I INPUT -p tcp --dport 22 -j ACCEPT
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
+iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300
+iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300 TCP
+iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
+iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
+iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -j ACCEPT
+iptables -A INPUT -m state --state INVALID -j DROP
+iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
 sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
 sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
@@ -218,13 +238,27 @@ sleep 3
 
 if systemctl is-active --quiet server-sldns; then
     print_success "SlowDNS service started"
+    # Test DNS functionality
+    print "Testing DNS functionality..."
+    sleep 2
+    # Test with port 5300 explicitly
+    if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
+        print_success "SlowDNS is listening on port $SLOWDNS_PORT"
+    else
+        print_warning "SlowDNS not responding on port $SLOWDNS_PORT"
+        systemctl status server-sldns --no-pager
+    fi
 else
+    print_error "SlowDNS service failed to start"
+    systemctl status server-sldns --no-pager
     # Try direct start as fallback
     pkill sldns-server 2>/dev/null
-    /etc/slowdns/sldns-server -udp :5300 -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu $MTU_SIZE -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
     sleep 2
     if pgrep -x "sldns-server" > /dev/null; then
         print_success "SlowDNS started directly"
+    else
+        print_error "Failed to start SlowDNS"
     fi
 fi
 
