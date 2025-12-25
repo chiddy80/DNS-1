@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -11,16 +10,15 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 # SSH Port Configuration
-SSHD_PORT=22  # OpenSSH on standard port 22
-SLOWDNS_PORT=5300  # SlowDNS runs on port 5300
-MTU_SIZE=1452  # MAXIMUM PERFORMANCE MTU
+DROPBEAR_PORT=2222  # Dropbear on port 2222
+SLOWDNS_PORT=5300   # SlowDNS runs on port 5300
 
 # Title Function
 print_title() {
     clear
     echo ""
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${WHITE} S L O W D N S   O P E N S S H${NC}"
+    echo -e "${WHITE} S L O W D N S   D R O P B E A R${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
     echo -e "${YELLOW} Complete Installation Script${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
@@ -57,7 +55,7 @@ fi
 # INSTALLATION PROCESS
 # ====================================================
 
-print "Starting OpenSSH SlowDNS Installation..."
+print "Starting Dropbear SlowDNS Installation..."
 echo ""
 
 # Disable UFW
@@ -82,41 +80,38 @@ print "Configuring DNS..."
 if [ -L /etc/resolv.conf ]; then
     rm -f /etc/resolv.conf
 fi
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
+echo "nameserver 8.8.8.8" | tee /etc/resolv.conf
+echo "nameserver 1.1.1.1" | tee -a /etc/resolv.conf
+echo "options edns0" | tee -a /etc/resolv.conf
 chattr +i /etc/resolv.conf 2>/dev/null
 print_success "DNS configured"
 
-# Configure OpenSSH
-print "Configuring OpenSSH on port $SSHD_PORT..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
-cat > /etc/ssh/sshd_config << EOF
-# OpenSSH Configuration - Standard Port 22
-Port $SSHD_PORT
-Protocol 2
-PermitRootLogin yes
-PubkeyAuthentication yes
-PasswordAuthentication yes
-PermitEmptyPasswords no
-ChallengeResponseAuthentication no
-UsePAM yes
-X11Forwarding no
-PrintMotd no
-PrintLastLog yes
-TCPKeepAlive yes
-ClientAliveInterval 60
-ClientAliveCountMax 3
-AllowTcpForwarding yes
-GatewayPorts yes
-Compression delayed
-Subsystem sftp /usr/lib/openssh/sftp-server
-MaxSessions 100
-MaxStartups 100:30:200
-LoginGraceTime 30
-UseDNS no
+# Install Dropbear
+print "Installing Dropbear SSH server..."
+apt-get update > /dev/null 2>&1
+apt-get install -y dropbear > /dev/null 2>&1
+print_success "Dropbear installed"
+
+# Configure Dropbear
+print "Configuring Dropbear on port $DROPBEAR_PORT..."
+cat > /etc/default/dropbear << EOF
+# Dropbear SSH server configuration
+NO_START=0
+DROPBEAR_PORT=$DROPBEAR_PORT
+DROPBEAR_EXTRA_ARGS=""
+DROPBEAR_BANNER="/etc/dropbear/banner"
+DROPBEAR_RECEIVE_WINDOW=65536
 EOF
-systemctl restart sshd
+
+# Create banner file
+echo "==========================================" > /etc/dropbear/banner
+echo "        Secure Dropbear SSH Server        " >> /etc/dropbear/banner
+echo "==========================================" >> /etc/dropbear/banner
+
+# Restart dropbear
+systemctl restart dropbear
 sleep 2
-print_success "OpenSSH configured on port $SSHD_PORT"
+print_success "Dropbear configured on port $DROPBEAR_PORT"
 
 # Setup SlowDNS
 print "Setting up SlowDNS..."
@@ -126,7 +121,6 @@ print_success "SlowDNS directory created"
 
 # Download files
 print "Downloading SlowDNS files..."
-
 wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
 if [ $? -eq 0 ]; then
     print_success "✓ server.key downloaded"
@@ -164,16 +158,16 @@ echo -e "${WHITE}─────────────────────
 read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
 echo ""
 
-# Create SlowDNS service with MTU 1452
+# Create SlowDNS service
 print "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
 Description=SlowDNS Server
-After=network.target sshd.service
+After=network.target dropbear.service
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu $MTU_SIZE -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$DROPBEAR_PORT
 Restart=always
 RestartSec=5
 User=root
@@ -187,7 +181,7 @@ print_success "Service file created"
 print "Setting up startup configuration..."
 cat > /etc/rc.local <<-END
 #!/bin/sh -e
-systemctl start sshd
+systemctl start dropbear
 iptables -F
 iptables -X
 iptables -t nat -F
@@ -198,7 +192,7 @@ iptables -P OUTPUT ACCEPT
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -j ACCEPT
 iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300
 iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300 TCP
 iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
@@ -207,13 +201,14 @@ iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
 iptables -A INPUT -p icmp -j ACCEPT
 iptables -A OUTPUT -j ACCEPT
 iptables -A INPUT -m state --state INVALID -j DROP
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
 sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
 sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
 exit 0
 END
+
 chmod +x /etc/rc.local
 systemctl enable rc-local > /dev/null 2>&1
 systemctl start rc-local.service > /dev/null 2>&1
@@ -238,9 +233,11 @@ sleep 3
 
 if systemctl is-active --quiet server-sldns; then
     print_success "SlowDNS service started"
+    
     # Test DNS functionality
     print "Testing DNS functionality..."
     sleep 2
+    
     # Test with port 5300 explicitly
     if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
         print_success "SlowDNS is listening on port $SLOWDNS_PORT"
@@ -251,10 +248,12 @@ if systemctl is-active --quiet server-sldns; then
 else
     print_error "SlowDNS service failed to start"
     systemctl status server-sldns --no-pager
+    
     # Try direct start as fallback
     pkill sldns-server 2>/dev/null
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu $MTU_SIZE -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$DROPBEAR_PORT &
     sleep 2
+    
     if pgrep -x "sldns-server" > /dev/null; then
         print_success "SlowDNS started directly"
     else
@@ -268,15 +267,33 @@ sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
 print_success "Packages cleaned"
 
 # Test connection
-print "Testing SSH connection..."
-if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$SSHD_PORT" 2>/dev/null; then
-    print_success "SSH port $SSHD_PORT is accessible"
+print "Testing Dropbear connection..."
+if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$DROPBEAR_PORT" 2>/dev/null; then
+    print_success "Dropbear port $DROPBEAR_PORT is accessible"
 else
-    print_error "SSH port $SSHD_PORT is not accessible"
+    print_error "Dropbear port $DROPBEAR_PORT is not accessible"
 fi
 
 echo ""
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-print_success "OpenSSH SlowDNS Installation Completed!"
+print_success "Dropbear SlowDNS Installation Completed!"
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
 echo ""
+echo -e "${YELLOW}Important Information:${NC}"
+echo "Dropbear SSH is running on port: $DROPBEAR_PORT"
+echo "SlowDNS is running on port: $SLOWDNS_PORT"
+echo ""
+echo -e "${CYAN}DNS Configuration:${NC}"
+echo "nameserver 8.8.8.8"
+echo "nameserver 1.1.1.1"
+echo "options edns0"
+echo ""
+echo -e "${CYAN}SlowDNS Configuration:${NC}"
+echo "MTU size: 2048"
+echo "Nameserver: $NAMESERVER"
+echo ""
+echo -e "${YELLOW}To test SlowDNS:${NC}"
+echo "dig @127.0.0.1 -p $SLOWDNS_PORT google.com"
+echo ""
+echo -e "${YELLOW}To connect via SSH:${NC}"
+echo "ssh -p $DROPBEAR_PORT root@$SERVER_IP"
