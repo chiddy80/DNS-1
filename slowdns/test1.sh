@@ -41,6 +41,12 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
 }
 
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}Please run as root${NC}"
+    exit 1
+fi
+
 # Show title
 clear
 print_title
@@ -60,7 +66,7 @@ echo ""
 # Install net-tools for netstat
 print "Installing required tools..."
 apt-get update -qq
-apt-get install -y net-tools  # For netstat command
+apt-get install -y net-tools curl wget  # Added curl and wget
 
 # Disable UFW
 print "Disabling UFW..."
@@ -81,13 +87,27 @@ print_success "systemd-resolved disabled"
 
 # DNS config - Modified as requested
 print "Configuring DNS..."
+
+# First, remove any immutable attribute if present
+if [ -f /etc/resolv.conf ]; then
+    chattr -i /etc/resolv.conf 2>/dev/null
+fi
+
+# Remove if it's a symlink
 if [ -L /etc/resolv.conf ]; then
     rm -f /etc/resolv.conf
 fi
-echo "nameserver 8.8.8.8" | tee /etc/resolv.conf > /dev/null
-echo "nameserver 1.1.1.1" | tee -a /etc/resolv.conf > /dev/null
-echo "options edns0" | tee -a /etc/resolv.conf > /dev/null
-chattr +i /etc/resolv.conf 2>/dev/null
+
+# Create new resolv.conf with proper permissions
+cat > /etc/resolv.conf << EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+options edns0
+EOF
+
+# Make it immutable to prevent changes
+chattr +i /etc/resolv.conf 2>/dev/null || print_warning "Could not make resolv.conf immutable (may be normal)"
+
 print_success "DNS configured"
 
 # Install and configure Dropbear on port 2222
@@ -123,11 +143,12 @@ else
     fi
 fi
 
-# Also generate DSA key for Dropbear compatibility - FIXED: changed 'das' to 'dss'
+# Also generate DSA key for Dropbear compatibility
 print "Generating DSA key for Dropbear..."
 if [ -f /etc/dropbear/dropbear_dss_host_key ]; then
     print_warning "DSA key already exists, skipping generation..."
 else
+    # Try to generate DSA key
     dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key 2>/dev/null
     if [ $? -eq 0 ]; then
         print_success "DSA key generated successfully"
@@ -139,10 +160,11 @@ else
 fi
 
 # Restart Dropbear
+print "Restarting Dropbear service..."
 systemctl restart dropbear
 sleep 2
 
-# Check if Dropbear is running - FIXED: using ss command as alternative
+# Check if Dropbear is running
 print "Checking if Dropbear is running..."
 if ss -tuln | grep -q ":$DROPEAR_PORT"; then
     print_success "Dropbear configured and running on port $DROPEAR_PORT"
@@ -162,7 +184,8 @@ else
         else
             print_error "Failed to start Dropbear"
             # Check for specific error
-            systemctl status dropbear --no-pager | tail -20
+            print "Checking Dropbear service status..."
+            systemctl status dropbear --no-pager
         fi
     fi
 fi
