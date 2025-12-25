@@ -6,8 +6,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# SSH Port Configuration
-SSHD_PORT=22
+# Dropbear Port Configuration
+DROPBEAR_PORT=222
 SLOWDNS_PORT=5300
 
 # Functions
@@ -23,7 +23,7 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
 }
 
-echo "Starting OpenSSH SlowDNS Installation..."
+echo "Starting Dropbear SlowDNS Installation..."
 
 # Get Server IP
 SERVER_IP=$(curl -s ifconfig.me)
@@ -31,39 +31,40 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# Configure OpenSSH
-echo "Configuring OpenSSH on port $SSHD_PORT..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
+# Install Dropbear
+echo "Installing Dropbear on port $DROPBEAR_PORT..."
+apt-get update > /dev/null 2>&1
+apt-get install -y dropbear > /dev/null 2>&1
 
-cat > /etc/ssh/sshd_config << EOF
-# OpenSSH Configuration
-Port $SSHD_PORT
-Protocol 2
-PermitRootLogin yes
-PubkeyAuthentication yes
-PasswordAuthentication yes
-PermitEmptyPasswords no
-ChallengeResponseAuthentication no
-UsePAM yes
-X11Forwarding no
-PrintMotd no
-PrintLastLog yes
-TCPKeepAlive yes
-ClientAliveInterval 60
-ClientAliveCountMax 3
-AllowTcpForwarding yes
-GatewayPorts yes
-Compression delayed
-Subsystem sftp /usr/lib/openssh/sftp-server
-MaxSessions 100
-MaxStartups 100:30:200
-LoginGraceTime 30
-UseDNS no
+# Configure Dropbear with enhanced parameters
+echo "Configuring Dropbear on port $DROPBEAR_PORT..."
+cat > /etc/default/dropbear << EOF
+# Dropbear SSH server configuration
+NO_START=0
+DROPBEAR_PORT=$DROPBEAR_PORT
+DROPBEAR_EXTRA_ARGS="-p $DROPBEAR_PORT -W 65536 -K 30 -I 0"
+DROPBEAR_BANNER="/etc/dropbear/banner"
+DROPBEAR_RSAKEY="/etc/dropbear/dropbear_rsa_host_key"
+DROPBEAR_DSSKEY="/etc/dropbear/dropbear_dss_host_key"
+DROPBEAR_ECDSAKEY="/etc/dropbear/dropbear_ecdsa_host_key"
+DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 
-systemctl restart sshd
+# Generate SSH RSA key for Dropbear
+echo "Generating RSA key for Dropbear..."
+if [ ! -f /etc/dropbear/dropbear_rsa_host_key ]; then
+    mkdir -p /etc/dropbear
+    # Generate RSA key with 2048 bits (Dropbear's default)
+    dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key -s 2048
+    print_success "RSA key generated for Dropbear"
+else
+    print_success "RSA key already exists for Dropbear"
+fi
+
+# Restart Dropbear
+systemctl restart dropbear
 sleep 2
-print_success "OpenSSH configured on port $SSHD_PORT"
+print_success "Dropbear configured on port $DROPBEAR_PORT with enhanced parameters"
 
 # Setup SlowDNS
 echo "Setting up SlowDNS..."
@@ -105,16 +106,16 @@ echo ""
 read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
 echo ""
 
-# Create SlowDNS service with MTU 2048
+# Create SlowDNS service with MTU 1800
 echo "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
 Description=SlowDNS Server
-After=network.target sshd.service
+After=network.target dropbear.service
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$DROPBEAR_PORT
 Restart=always
 RestartSec=5
 User=root
@@ -129,7 +130,7 @@ print_success "Service file created"
 echo "Setting up startup configuration..."
 cat > /etc/rc.local <<-END
 #!/bin/sh -e
-systemctl start sshd
+systemctl start dropbear
 iptables -F
 iptables -X
 iptables -t nat -F
@@ -140,7 +141,7 @@ iptables -P OUTPUT ACCEPT
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -j ACCEPT
 iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
 iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT
 iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
@@ -149,8 +150,8 @@ iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
 iptables -A INPUT -p icmp -j ACCEPT
 iptables -A OUTPUT -j ACCEPT
 iptables -A INPUT -m state --state INVALID -j DROP
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport $DROPBEAR_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
 sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
 sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
@@ -192,9 +193,9 @@ if systemctl is-active --quiet server-sldns; then
 else
     print_error "SlowDNS service failed to start"
     
-    # Try direct start with MTU 2048
+    # Try direct start with MTU 1800
     pkill sldns-server 2>/dev/null
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$DROPBEAR_PORT &
     sleep 2
     
     if pgrep -x "sldns-server" > /dev/null; then
@@ -210,19 +211,38 @@ sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
 print_success "Packages cleaned"
 
 # Test connection
-echo "Testing SSH connection..."
-if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$SSHD_PORT" 2>/dev/null; then
-    print_success "SSH port $SSHD_PORT is accessible"
+echo "Testing Dropbear connection..."
+if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$DROPBEAR_PORT" 2>/dev/null; then
+    print_success "Dropbear port $DROPBEAR_PORT is accessible"
 else
-    print_error "SSH port $SSHD_PORT is not accessible"
+    print_error "Dropbear port $DROPBEAR_PORT is not accessible"
 fi
 
+# Display RSA key fingerprint
+echo "Displaying Dropbear RSA key fingerprint..."
+if [ -f /etc/dropbear/dropbear_rsa_host_key ]; then
+    echo "RSA Key Fingerprint:"
+    dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key | grep -E "(ssh-rsa|Fingerprint)" | head -5
+    print_success "RSA key fingerprint displayed"
+else
+    print_warning "RSA key file not found"
+fi
+
+# Display Dropbear enhanced parameters
 echo ""
-print_success "OpenSSH SlowDNS Installation Completed!"
+print_success "Dropbear SlowDNS Installation Completed!"
 echo ""
 echo "Server IP: $SERVER_IP"
-echo "SSH Port: $SSHD_PORT"
+echo "Dropbear Port: $DROPBEAR_PORT"
+echo "Dropbear Parameters: -W 65536 -K 30 -I 0"
 echo "SlowDNS Port: $SLOWDNS_PORT"
-echo "MTU: 2048"
+echo "MTU: 1800"
+echo ""
+echo "Enhanced Dropbear Parameters:"
+echo "  -W 65536: Keepalive interval (seconds)"
+echo "  -K 30   : Maximum authentication attempts"
+echo "  -I 0    : Idle timeout (0 = disabled)"
+echo ""
+echo "SSH RSA key has been generated for secure connections"
 echo ""
 echo "Note: SlowDNS is running on port $SLOWDNS_PORT"
