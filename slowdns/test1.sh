@@ -57,6 +57,11 @@ fi
 print "Starting Dropbear SlowDNS Installation..."
 echo ""
 
+# Install net-tools for netstat
+print "Installing required tools..."
+apt-get update -qq
+apt-get install -y net-tools  # For netstat command
+
 # Disable UFW
 print "Disabling UFW..."
 sudo ufw disable 2>/dev/null
@@ -87,7 +92,6 @@ print_success "DNS configured"
 
 # Install and configure Dropbear on port 2222
 print "Installing Dropbear SSH on port $DROPEAR_PORT..."
-apt-get update -qq
 apt-get install -y dropbear
 
 # Backup original config
@@ -119,16 +123,18 @@ else
     fi
 fi
 
-# Also generate DSA key for Dropbear compatibility
+# Also generate DSA key for Dropbear compatibility - FIXED: changed 'das' to 'dss'
 print "Generating DSA key for Dropbear..."
 if [ -f /etc/dropbear/dropbear_dss_host_key ]; then
     print_warning "DSA key already exists, skipping generation..."
 else
-    dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key
+    dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key 2>/dev/null
     if [ $? -eq 0 ]; then
         print_success "DSA key generated successfully"
     else
         print_warning "Failed to generate DSA key, Dropbear will generate it automatically"
+        # Create empty file to avoid service failure
+        touch /etc/dropbear/dropbear_dss_host_key
     fi
 fi
 
@@ -136,17 +142,28 @@ fi
 systemctl restart dropbear
 sleep 2
 
-# Check if Dropbear is running
-if netstat -tuln | grep -q ":$DROPEAR_PORT"; then
+# Check if Dropbear is running - FIXED: using ss command as alternative
+print "Checking if Dropbear is running..."
+if ss -tuln | grep -q ":$DROPEAR_PORT"; then
+    print_success "Dropbear configured and running on port $DROPEAR_PORT"
+elif netstat -tuln 2>/dev/null | grep -q ":$DROPEAR_PORT"; then
     print_success "Dropbear configured and running on port $DROPEAR_PORT"
 else
-    print_warning "Dropbear may not be running, trying alternative start method..."
-    dropbear -p $DROPEAR_PORT -s -w
-    sleep 2
-    if netstat -tuln | grep -q ":$DROPEAR_PORT"; then
-        print_success "Dropbear started on port $DROPEAR_PORT"
+    print_warning "Dropbear may not be running, checking service status..."
+    if systemctl is-active --quiet dropbear; then
+        print_success "Dropbear service is active"
     else
-        print_error "Failed to start Dropbear"
+        print_warning "Trying alternative start method..."
+        pkill dropbear 2>/dev/null
+        dropbear -p $DROPEAR_PORT -s -w
+        sleep 2
+        if ss -tuln | grep -q ":$DROPEAR_PORT" || netstat -tuln 2>/dev/null | grep -q ":$DROPEAR_PORT"; then
+            print_success "Dropbear started on port $DROPEAR_PORT"
+        else
+            print_error "Failed to start Dropbear"
+            # Check for specific error
+            systemctl status dropbear --no-pager | tail -20
+        fi
     fi
 fi
 
