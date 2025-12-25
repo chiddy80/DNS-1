@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Ensure running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "[✗] Please run this script as root"
+    exit 1
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -9,6 +15,9 @@ NC='\033[0m'
 # SSH Port Configuration
 SSHD_PORT=22
 SLOWDNS_PORT=5300
+
+# Predefined nameserver (change if needed)
+NAMESERVER="dns.example.com"
 
 # Functions
 print_success() {
@@ -39,9 +48,9 @@ cat > /etc/ssh/sshd_config << EOF
 # OpenSSH Configuration
 Port $SSHD_PORT
 Protocol 2
-PermitRootLogin yes
+PermitRootLogin prohibit-password
 PubkeyAuthentication yes
-PasswordAuthentication yes
+PasswordAuthentication no
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
 UsePAM yes
@@ -63,7 +72,7 @@ EOF
 
 systemctl restart sshd
 sleep 2
-print_success "OpenSSH configured on port $SSHD_PORT"
+print_success "OpenSSH configured on port $SSHD_PORT with key-based authentication only"
 
 # Setup SlowDNS
 echo "Setting up SlowDNS..."
@@ -73,37 +82,12 @@ print_success "SlowDNS directory created"
 
 # Download files
 echo "Downloading SlowDNS files..."
-wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
-if [ $? -eq 0 ]; then
-    print_success "server.key downloaded"
-else
-    wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/server.key"
-    print_success "server.key downloaded"
-fi
-
-wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
-if [ $? -eq 0 ]; then
-    print_success "server.pub downloaded"
-else
-    wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/server.pub"
-    print_success "server.pub downloaded"
-fi
-
-wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
-if [ $? -eq 0 ]; then
-    print_success "sldns-server downloaded"
-else
-    wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
-    print_success "sldns-server downloaded"
-fi
+wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/chiddy80/Halotel-Slow-DNS/main/DNSTT%20MODED/server.key" && print_success "server.key downloaded"
+wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/chiddy80/Halotel-Slow-DNS/main/DNSTT%20MODED/server.pub" && print_success "server.pub downloaded"
+wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/chiddy80/Halotel-Slow-DNS/main/DNSTT%20MODED/dnstt-server" && print_success "dnstt-server downloaded"
 
 chmod +x /etc/slowdns/sldns-server
 print_success "File permissions set"
-
-# Get nameserver
-echo ""
-read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
-echo ""
 
 # Create SlowDNS service with MTU 1800
 echo "Creating SlowDNS service..."
@@ -205,9 +189,8 @@ else
     fi
 fi
 
-# Clean up
-echo "Cleaning up packages..."
-sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
+# Clean up packages (no sudo)
+apt-get remove -y libpam-pwquality 2>/dev/null || true
 print_success "Packages cleaned"
 
 # Test connection
