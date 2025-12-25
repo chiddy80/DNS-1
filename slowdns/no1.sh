@@ -51,63 +51,102 @@ systemctl disable ufw 2>/dev/null || true
 print_success "Configuring OpenSSH on port $SSHD_PORT..."
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null || true
 
+# Configure SSH
+cat >> /etc/ssh/sshd_config << EOF
+# SlowDNS SSH Configuration
+Port $SSHD_PORT
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding yes
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+EOF
+
+# Restart SSH
+systemctl restart ssh
+
+# Configure firewall
+print_success "Configuring firewall..."
+iptables -F
+iptables -X
 iptables -A INPUT -p icmp -j ACCEPT
 iptables -A OUTPUT -j ACCEPT
 iptables -A INPUT -m state --state INVALID -j DROP
 iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
 iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
 
-echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
-sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
-sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
-
-exit 0
-END
-
-chmod +x /etc/rc.local
-systemctl enable rc-local > /dev/null 2>&1 || true
-systemctl start rc-local.service > /dev/null 2>&1 || true
+# Save iptables rules
+iptables-save > /etc/iptables/rules.v4
 
 # Disable IPv6
 print_success "Disabling IPv6..."
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true
 sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 || true
+sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
+sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
+
 echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf 2>/dev/null || true
 echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf 2>/dev/null || true
 sysctl -p > /dev/null 2>&1 || true
+
+# Create rc.local for startup
+print_success "Creating startup configuration..."
+cat > /etc/rc.local << EOF
+#!/bin/bash
+# Enable on startup
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+sysctl -w net.ipv6.conf.all.disable_ipv6=1
+sysctl -w net.core.rmem_max=134217728
+sysctl -w net.core.wmem_max=134217728
+iptables-restore < /etc/iptables/rules.v4
+exit 0
+EOF
+
+chmod +x /etc/rc.local
+systemctl enable rc-local > /dev/null 2>&1 || true
+systemctl start rc-local.service > /dev/null 2>&1 || true
+
+# Check if SlowDNS is installed
+print_success "Checking SlowDNS installation..."
+if [ ! -f "/etc/slowdns/sldns-server" ]; then
+    print_error "SlowDNS not found! Please install SlowDNS first."
+    exit 1
+fi
 
 # Start SlowDNS service
 print_success "Starting SlowDNS service..."
 pkill sldns-server 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable server-sldns > /dev/null 2>&1 || true
-systemctl start server-sldns 2>/dev/null || true
-sleep 3
 
-if systemctl is-active --quiet server-sldns 2>/dev/null; then
-    print_success "SlowDNS service started"
+if [ -f "/etc/systemd/system/server-sldns.service" ]; then
+    systemctl enable server-sldns > /dev/null 2>&1 || true
+    systemctl start server-sldns 2>/dev/null || true
+    sleep 3
     
-    # Test DNS functionality
-    print_success "Testing SlowDNS on port $SLOWDNS_PORT..."
-    sleep 2
-    if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
-        print_success "SlowDNS is listening on port $SLOWDNS_PORT"
+    if systemctl is-active --quiet server-sldns 2>/dev/null; then
+        print_success "SlowDNS service started"
     else
-        print_warning "SlowDNS not responding on port $SLOWDNS_PORT"
+        print_error "SlowDNS service failed to start"
     fi
 else
-    print_error "SlowDNS service failed to start"
-    
-    # Try direct start as fallback with MTU 1800
+    print_warning "SlowDNS service file not found, starting directly..."
     pkill sldns-server 2>/dev/null || true
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key 8.8.8.8 127.0.0.1:$SSHD_PORT &
     sleep 2
-    
-    if pgrep -x "sldns-server" > /dev/null; then
-        print_success "SlowDNS started directly"
-    else
-        print_error "Failed to start SlowDNS"
-    fi
+fi
+
+# Test DNS functionality
+print_success "Testing SlowDNS on port $SLOWDNS_PORT..."
+sleep 2
+if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
+    print_success "SlowDNS is listening on port $SLOWDNS_PORT"
+else
+    print_warning "SlowDNS not responding on port $SLOWDNS_PORT"
 fi
 
 # Clean up
@@ -147,3 +186,6 @@ fi
 # Show final status
 echo ""
 echo -e "${GREEN}=== INSTALLATION COMPLETED ===${NC}"
+echo -e "${YELLOW}Server IP:${NC} $SERVER_IP"
+echo -e "${YELLOW}SSH Port:${NC} $SSHD_PORT"
+echo -e "${YELLOW}SlowDNS Port:${NC} $SLOWDNS_PORT"
