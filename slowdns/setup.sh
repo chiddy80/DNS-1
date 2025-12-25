@@ -4,15 +4,12 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
 NC='\033[0m'
 
-# SSH Port Configuration
+# Port Configuration
 SSHD_PORT=22      # OpenSSH on standard port 22
 SLOWDNS_PORT=5300 # SlowDNS runs on port 5300
+DNS_PORT=53       # Standard DNS port
 
 # Functions
 print_success() {
@@ -27,13 +24,20 @@ print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
 }
 
-# Clear screen
-clear
-
-# Get Server IP
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "Unknown")
+# Show port information
+echo "=== PORT CONFIGURATION ==="
+echo ""
+echo -e "${GREEN}Port 22${NC}   : SSH Server"
+echo -e "${GREEN}Port 53${NC}   : DNS Server (Standard DNS port)"
+echo -e "${GREEN}Port 5300${NC} : SlowDNS Server"
+echo ""
+echo "=========================="
+echo ""
 
 print_success "Starting OpenSSH SlowDNS Installation..."
+
+# Get Server IP
+SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' || echo "Unknown")
 
 # Disable UFW
 print_success "Disabling UFW..."
@@ -50,20 +54,20 @@ if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
 fi
 systemctl disable systemd-resolved 2>/dev/null || true
 
-# DNS config - Fixed resolv.conf handling
-print_success "Configuring DNS..."
+# DNS config - Fixed resolv.conf
+print_success "Configuring DNS resolv.conf..."
 # Remove immutable attribute if set
 chattr -i /etc/resolv.conf 2>/dev/null || true
 
-# Create new resolv.conf
-cat > /etc/resolv.conf << EOF
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-options timeout:2 attempts:3 rotate
-EOF
+# Create new resolv.conf with EDNS0
+echo "nameserver 8.8.8.8" | tee /etc/resolv.conf > /dev/null
+echo "nameserver 1.1.1.1" | tee -a /etc/resolv.conf > /dev/null
+echo "options edns0" | tee -a /etc/resolv.conf > /dev/null
 
 # Try to set immutable attribute
 chattr +i /etc/resolv.conf 2>/dev/null || true
+
+print_success "DNS resolv.conf configured with EDNS0"
 
 # Configure OpenSSH
 print_success "Configuring OpenSSH on port $SSHD_PORT..."
@@ -140,11 +144,11 @@ chmod +x /etc/slowdns/sldns-server
 
 # Get nameserver
 echo ""
-echo -e "${CYAN}[ NAMESERVER SETUP ]${NC}"
+echo -e "${GREEN}[ NAMESERVER SETUP ]${NC}"
 read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
 echo ""
 
-# Create SlowDNS service with MTU 2048
+# Create SlowDNS service with MTU 1800
 print_success "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
@@ -153,7 +157,7 @@ After=network.target sshd.service
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
 Restart=always
 RestartSec=5
 User=root
@@ -180,6 +184,8 @@ iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
 iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
 iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT
+iptables -A INPUT -p udp --dport $DNS_PORT -j ACCEPT
+iptables -A INPUT -p tcp --dport $DNS_PORT -j ACCEPT
 iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
 iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
 iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
@@ -219,7 +225,7 @@ if systemctl is-active --quiet server-sldns 2>/dev/null; then
     print_success "SlowDNS service started"
     
     # Test DNS functionality
-    print_success "Testing DNS functionality..."
+    print_success "Testing SlowDNS on port $SLOWDNS_PORT..."
     sleep 2
     
     if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
@@ -230,9 +236,9 @@ if systemctl is-active --quiet server-sldns 2>/dev/null; then
 else
     print_error "SlowDNS service failed to start"
     
-    # Try direct start as fallback
+    # Try direct start as fallback with MTU 1800
     pkill sldns-server 2>/dev/null || true
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
     sleep 2
     
     if pgrep -x "sldns-server" > /dev/null; then
@@ -246,25 +252,51 @@ fi
 print_success "Cleaning up packages..."
 sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
 
-# Test connection
-print_success "Testing SSH connection..."
+# Test connections
+echo ""
+echo -e "${GREEN}=== PORT TESTING ===${NC}"
+
+# Test SSH port 22
+print_success "Testing SSH connection on port $SSHD_PORT..."
 if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$SSHD_PORT" 2>/dev/null; then
     print_success "SSH port $SSHD_PORT is accessible"
 else
     print_error "SSH port $SSHD_PORT is not accessible"
 fi
 
+# Test SlowDNS port 5300
+print_success "Testing SlowDNS on port $SLOWDNS_PORT..."
+if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
+    print_success "SlowDNS port $SLOWDNS_PORT is accessible"
+else
+    print_warning "SlowDNS port $SLOWDNS_PORT may not be responding"
+fi
+
+# Check port 53 status
+print_success "Checking DNS port $DNS_PORT..."
+if ss -tulpn | grep -q ":$DNS_PORT"; then
+    print_warning "Port $DNS_PORT is in use by another service"
+    echo "Current services on port 53:"
+    ss -tulpn | grep ":53" | sed 's/^/  /'
+else
+    print_success "Port $DNS_PORT is available for EDNS Proxy"
+fi
+
+# Show final status
 echo ""
-echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-print_success "OpenSSH SlowDNS Installation Completed!"
-echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
+echo -e "${GREEN}=== INSTALLATION COMPLETED ===${NC}"
 echo ""
-echo -e "${YELLOW}Important Note:${NC}"
-echo "SlowDNS is running on port $SLOWDNS_PORT (not 53)"
-echo "To test SlowDNS, you need to use:"
-echo "  dig @127.0.0.1 -p $SLOWDNS_PORT google.com"
+echo -e "${YELLOW}Important Information:${NC}"
 echo ""
-echo "To make SlowDNS work on port 53, you need to:"
+echo -e "Port ${GREEN}22${NC}   : SSH Server (Direct SSH access)"
+echo -e "Port ${GREEN}53${NC}   : DNS Server (Available for EDNS Proxy)"
+echo -e "Port ${GREEN}5300${NC} : SlowDNS Server (Currently running)"
+echo ""
+echo -e "${YELLOW}To use SlowDNS on port 53:${NC}"
 echo "1. Install EDNS Proxy (separate script)"
-echo "2. Or use iptables to redirect port 53 to $SLOWDNS_PORT"
+echo "2. Or use iptables to redirect port 53 to 5300"
 echo ""
+echo -e "${YELLOW}Current resolv.conf:${NC}"
+cat /etc/resolv.conf | sed 's/^/  /'
+echo ""
+echo -e "${YELLOW}Server IP:${NC} $SERVER_IP"
