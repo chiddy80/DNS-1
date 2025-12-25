@@ -69,7 +69,7 @@ apt-get update -qq
 
 # Install required tools
 print "Installing required tools..."
-apt-get install -y net-tools curl wget build-essential zlib1g-dev  # Added build tools
+apt-get install -y net-tools curl wget dropbear
 print_success "Tools installed"
 
 # Disable UFW
@@ -115,69 +115,14 @@ chattr +i /etc/resolv.conf 2>/dev/null || print_warning "Could not make resolv.c
 print_success "DNS configured"
 
 # ====================================================
-# INSTALL DROPBEAR 2017.75 FROM SOURCE
+# INSTALL AND CONFIGURE DROPBEAR
 # ====================================================
-print "Installing Dropbear SSH 2017.75 from source on port $DROPEAR_PORT..."
+print "Installing and configuring Dropbear on port $DROPEAR_PORT..."
 
-# Remove existing dropbear if installed via apt
-print "Removing existing dropbear packages..."
-apt-get remove --purge -y dropbear* 2>/dev/null || true
-
-# Download and compile Dropbear 2017.75
-print "Downloading Dropbear 2017.75 source..."
-cd /tmp
-rm -rf dropbear-2017.75 dropbear-2017.75.tar.bz2 2>/dev/null
-
-# Try multiple download sources
-wget -q --timeout=30 --tries=2 https://matt.ucc.asn.au/dropbear/releases/dropbear-2017.75.tar.bz2 || \
-wget -q --timeout=30 --tries=2 https://mirror.rackspace.com/dropbear/releases/dropbear-2017.75.tar.bz2 || \
-wget -q --timeout=30 --tries=2 https://ftp.lysator.liu.se/pub/openssh/dropbear/dropbear-2017.75.tar.bz2
-
-if [ ! -f dropbear-2017.75.tar.bz2 ]; then
-    print_error "Failed to download Dropbear 2017.75 source"
-    print "Trying alternative download method..."
-    curl -L -o dropbear-2017.75.tar.bz2 "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_2017.75.tar.gz" 2>/dev/null || {
-        print_error "Cannot download Dropbear 2017.75"
-        print_warning "Falling back to system package manager..."
-        apt-get install -y dropbear
-    }
-else
-    print_success "Dropbear 2017.75 source downloaded"
-fi
-
-# Extract and compile if download succeeded
-if [ -f dropbear-2017.75.tar.bz2 ] || [ -f DROPBEAR_2017.75.tar.gz ]; then
-    print "Extracting Dropbear source..."
-    if [ -f dropbear-2017.75.tar.bz2 ]; then
-        tar -xjf dropbear-2017.75.tar.bz2
-    else
-        tar -xzf DROPBEAR_2017.75.tar.gz
-        mv dropbear-DROPBEAR_2017.75 dropbear-2017.75
-    fi
-    
-    cd dropbear-2017.75
-    
-    print "Configuring Dropbear..."
-    ./configure --prefix=/usr --sysconfdir=/etc/dropbear
-    
-    print "Compiling Dropbear..."
-    make -j$(nproc)
-    
-    print "Installing Dropbear..."
-    make install
-    
-    # Create necessary directories
-    mkdir -p /etc/dropbear /var/run/dropbear
-    
-    # Create default banner
-    echo "Welcome to Dropbear SSH Server" > /etc/dropbear/banner
-    
-    print_success "Dropbear 2017.75 compiled and installed from source"
-else
-    # Use system dropbear if compilation failed
-    print_warning "Using system package manager dropbear version"
-    DROPBEAR_VERSION=$(dropbear -V 2>&1 | grep -o 'dropbear[^ ]*' || echo "unknown")
-    print "System Dropbear version: $DROPBEAR_VERSION"
+# Check if dropbear is installed
+if ! command -v dropbear &> /dev/null; then
+    print "Dropbear not found, installing via package manager..."
+    apt-get install -y dropbear
 fi
 
 # Backup original config if exists
@@ -186,9 +131,8 @@ if [ -f /etc/default/dropbear ]; then
 fi
 
 # Configure Dropbear
-print "Configuring Dropbear on port $DROPEAR_PORT..."
 cat > /etc/default/dropbear << EOF
-# Dropbear SSH Configuration - Port $DROPEAR_PORT (2017.75)
+# Dropbear SSH Configuration - Port $DROPEAR_PORT
 NO_START=0
 DROPBEAR_PORT=$DROPEAR_PORT
 DROPBEAR_EXTRA_ARGS="-s -w -p $DROPEAR_PORT"
@@ -199,58 +143,68 @@ DROPBEAR_ECDSAKEY="/etc/dropbear/dropbear_ecdsa_host_key"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 
+# Create banner file
+mkdir -p /etc/dropbear
+echo "Welcome to Dropbear SSH Server" > /etc/dropbear/banner
+
 # Generate SSH RSA key (2048-bit) as requested
 print "Generating SSH RSA key (2048-bit)..."
 if [ -f /etc/dropbear/dropbear_rsa_host_key ]; then
     print_warning "RSA key already exists, skipping generation..."
 else
-    ssh-keygen -t rsa -b 2048 -f /etc/dropbear/dropbear_rsa_host_key -N "" -q
-    if [ $? -eq 0 ]; then
-        print_success "SSH RSA key generated successfully"
+    # Try with dropbearkey first (more reliable for dropbear)
+    if command -v dropbearkey &> /dev/null; then
+        dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key -s 2048 2>/dev/null
+        if [ $? -eq 0 ]; then
+            print_success "SSH RSA key generated successfully with dropbearkey"
+        else
+            # Fallback to ssh-keygen
+            ssh-keygen -t rsa -b 2048 -f /etc/dropbear/dropbear_rsa_host_key -N "" -q
+            if [ $? -eq 0 ]; then
+                print_success "SSH RSA key generated successfully with ssh-keygen"
+            else
+                print_error "Failed to generate SSH RSA key"
+            fi
+        fi
     else
-        print_error "Failed to generate SSH RSA key"
-        # Try with dropbearkey instead
-        dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key -s 2048 2>/dev/null && \
-        print_success "SSH RSA key generated with dropbearkey"
+        ssh-keygen -t rsa -b 2048 -f /etc/dropbear/dropbear_rsa_host_key -N "" -q
+        if [ $? -eq 0 ]; then
+            print_success "SSH RSA key generated successfully"
+        else
+            print_error "Failed to generate SSH RSA key"
+        fi
     fi
 fi
 
-# Also generate DSA key for Dropbear compatibility
+# Generate DSA key for Dropbear compatibility
 print "Generating DSA key for Dropbear..."
 if [ -f /etc/dropbear/dropbear_dss_host_key ]; then
     print_warning "DSA key already exists, skipping generation..."
 else
-    # Try to generate DSA key
-    dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key 2>/dev/null
-    if [ $? -eq 0 ]; then
-        print_success "DSA key generated successfully"
+    # Try to generate DSA key with dropbearkey
+    if command -v dropbearkey &> /dev/null; then
+        dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key 2>/dev/null
+        if [ $? -eq 0 ]; then
+            print_success "DSA key generated successfully"
+        else
+            print_warning "DSA key generation failed, will use existing or auto-generate"
+            touch /etc/dropbear/dropbear_dss_host_key 2>/dev/null || true
+        fi
     else
-        print_warning "Failed to generate DSA key, Dropbear will generate it automatically"
-        # Create empty file to avoid service failure
-        touch /etc/dropbear/dropbear_dss_host_key
+        print_warning "dropbearkey not available, DSA key will be auto-generated"
+        touch /etc/dropbear/dropbear_dss_host_key 2>/dev/null || true
     fi
 fi
 
-# Create systemd service file for Dropbear
-print "Creating Dropbear systemd service..."
-cat > /etc/systemd/system/dropbear.service << EOF
-[Unit]
-Description=Dropbear SSH Server (2017.75)
-After=network.target
+# Ensure proper permissions
+chmod 600 /etc/dropbear/dropbear_*_host_key 2>/dev/null || true
 
-[Service]
-Type=simple
-ExecStart=/usr/sbin/dropbear -F -E -p $DROPEAR_PORT -s -w
-Restart=always
-RestartSec=5
-User=root
+# Create directory for dropbear PID
+mkdir -p /var/run/dropbear
+chmod 755 /var/run/dropbear
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start Dropbear service
-print "Starting Dropbear service..."
+# Restart Dropbear service
+print "Restarting Dropbear service..."
 systemctl daemon-reload
 systemctl enable dropbear > /dev/null 2>&1
 systemctl restart dropbear
@@ -258,31 +212,92 @@ sleep 3
 
 # Check if Dropbear is running
 print "Checking if Dropbear is running..."
-if ss -tuln | grep -q ":$DROPEAR_PORT"; then
-    print_success "Dropbear configured and running on port $DROPEAR_PORT"
-    DROPBEAR_VERSION=$(dropbear -V 2>&1 | head -1 || echo "2017.75 (compiled)")
-    print "Dropbear version: $DROPBEAR_VERSION"
+DROPBEAR_RUNNING=false
+
+# Check with multiple methods
+if ss -tuln 2>/dev/null | grep -q ":$DROPEAR_PORT"; then
+    DROPBEAR_RUNNING=true
 elif netstat -tuln 2>/dev/null | grep -q ":$DROPEAR_PORT"; then
+    DROPBEAR_RUNNING=true
+elif systemctl is-active --quiet dropbear; then
+    DROPBEAR_RUNNING=true
+    print "Dropbear service is active"
+fi
+
+if $DROPBEAR_RUNNING; then
     print_success "Dropbear configured and running on port $DROPEAR_PORT"
+    
+    # Show Dropbear version
+    DROPBEAR_VERSION=$(dropbear -V 2>&1 | head -1 || echo "unknown version")
+    print "Dropbear version: $DROPBEAR_VERSION"
 else
-    print_warning "Dropbear may not be running, checking service status..."
-    if systemctl is-active --quiet dropbear; then
-        print_success "Dropbear service is active"
-    else
-        print_warning "Trying alternative start method..."
-        pkill dropbear 2>/dev/null
-        # Try direct start
-        /usr/sbin/dropbear -p $DROPEAR_PORT -s -w -F -E &
+    print_warning "Dropbear service not running normally, attempting manual start..."
+    
+    # Kill any existing dropbear processes
+    pkill dropbear 2>/dev/null
+    sleep 1
+    
+    # Start dropbear manually
+    if command -v dropbear &> /dev/null; then
+        # Create directory for dropbear
+        mkdir -p /etc/dropbear /var/run/dropbear
+        
+        # Start dropbear in background
+        dropbear -p $DROPEAR_PORT -s -w -F -E &
+        DROPBEAR_PID=$!
         sleep 2
-        if ss -tuln | grep -q ":$DROPEAR_PORT" || netstat -tuln 2>/dev/null | grep -q ":$DROPEAR_PORT"; then
-            print_success "Dropbear started on port $DROPEAR_PORT"
+        
+        # Check if started successfully
+        if ps -p $DROPBEAR_PID > /dev/null 2>&1; then
+            print_success "Dropbear started manually on port $DROPEAR_PORT (PID: $DROPBEAR_PID)"
+            
+            # Save PID to file for later management
+            echo $DROPBEAR_PID > /var/run/dropbear/dropbear.pid
+            
+            # Create a simple init script to restart on boot
+            cat > /etc/init.d/dropbear-manual << EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          dropbear-manual
+# Required-Start:    \$network \$remote_fs
+# Required-Stop:     \$network \$remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Dropbear SSH server (manual)
+### END INIT INFO
+
+case "\$1" in
+    start)
+        pkill dropbear 2>/dev/null
+        dropbear -p $DROPEAR_PORT -s -w -F -E &
+        echo \$! > /var/run/dropbear/dropbear.pid
+        ;;
+    stop)
+        pkill dropbear 2>/dev/null
+        rm -f /var/run/dropbear/dropbear.pid
+        ;;
+    restart)
+        \$0 stop
+        sleep 1
+        \$0 start
+        ;;
+    *)
+        echo "Usage: \$0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+exit 0
+EOF
+            
+            chmod +x /etc/init.d/dropbear-manual
+            update-rc.d dropbear-manual defaults > /dev/null 2>&1
         else
-            print_error "Failed to start Dropbear"
-            print "Checking Dropbear binary..."
-            if [ -x /usr/sbin/dropbear ]; then
-                /usr/sbin/dropbear -h
-            fi
+            print_error "Failed to start Dropbear manually"
+            print "Checking system logs for errors..."
+            journalctl -u dropbear --no-pager | tail -20
         fi
+    else
+        print_error "Dropbear binary not found. Installation may have failed."
     fi
 fi
 
@@ -338,7 +353,7 @@ print "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
 Description=SlowDNS Server
-After=network.target dropbear.service
+After=network.target
 
 [Service]
 Type=simple
@@ -357,8 +372,11 @@ print "Setting up startup configuration..."
 cat > /etc/rc.local <<-END
 #!/bin/sh -e
 
-# Start Dropbear
-systemctl start dropbear
+# Start Dropbear (try both methods)
+systemctl start dropbear 2>/dev/null || true
+if [ -f /etc/init.d/dropbear-manual ]; then
+    /etc/init.d/dropbear-manual start
+fi
 
 # Flush iptables
 iptables -F
@@ -464,26 +482,27 @@ else
     fi
 fi
 
-# Clean up
-print "Cleaning up packages..."
-sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
-print_success "Packages cleaned"
-
 # Test connection
 print "Testing Dropbear connection..."
 if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$DROPEAR_PORT" 2>/dev/null; then
     print_success "Dropbear port $DROPEAR_PORT is accessible"
 else
-    print_error "Dropbear port $DROPEAR_PORT is not accessible"
+    print_warning "Dropbear port $DROPEAR_PORT is not accessible locally"
+    print "Checking if port is open for external connections..."
+    if ss -tuln | grep -q ":$DROPEAR_PORT"; then
+        print_success "Dropbear is listening on port $DROPEAR_PORT"
+    else
+        print_error "Dropbear is not listening on any port"
+    fi
 fi
 
 echo ""
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-print_success "Dropbear 2017.75 + SlowDNS Installation Completed!"
+print_success "Dropbear + SlowDNS Installation Completed!"
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
 echo ""
 echo -e "${YELLOW}Installation Summary:${NC}"
-echo "• Dropbear SSH: Port $DROPEAR_PORT (Version 2017.75)"
+echo "• Dropbear SSH: Port $DROPEAR_PORT"
 echo "• SlowDNS Server: Port $SLOWDNS_PORT"
 echo "• Nameserver: $NAMESERVER"
 echo "• SSH Key: 2048-bit RSA"
@@ -493,4 +512,9 @@ echo "SlowDNS is running on port $SLOWDNS_PORT (not 53)"
 echo "To make SlowDNS work on port 53, you need to:"
 echo "1. Install EDNS Proxy (separate script)"
 echo "2. Or use iptables to redirect port 53 to $SLOWDNS_PORT"
+echo ""
+echo -e "${YELLOW}Testing Commands:${NC}"
+echo "Check Dropbear: ss -tuln | grep :$DROPEAR_PORT"
+echo "Check SlowDNS: ss -uln | grep :$SLOWDNS_PORT"
+echo "Test SSH: ssh -p $DROPEAR_PORT root@localhost"
 echo ""
