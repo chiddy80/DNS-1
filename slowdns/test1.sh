@@ -31,15 +31,6 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# Disable UFW
-echo "Disabling UFW..."
-sudo ufw disable 2>/dev/null
-if systemctl is-active --quiet ufw; then
-    sudo systemctl stop ufw
-fi
-systemctl disable ufw 2>/dev/null
-print_success "UFW disabled"
-
 # Configure OpenSSH
 echo "Configuring OpenSSH on port $SSHD_PORT..."
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
@@ -114,7 +105,7 @@ echo ""
 read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
 echo ""
 
-# Create SlowDNS service with MTU 1800
+# Create SlowDNS service with MTU 2048
 echo "Creating SlowDNS service..."
 cat > /etc/systemd/system/server-sldns.service << EOF
 [Unit]
@@ -123,7 +114,7 @@ After=network.target sshd.service
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
 Restart=always
 RestartSec=5
 User=root
@@ -193,7 +184,6 @@ if systemctl is-active --quiet server-sldns; then
     
     echo "Testing DNS functionality..."
     sleep 2
-    
     if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
         print_success "SlowDNS is listening on port $SLOWDNS_PORT"
     else
@@ -202,9 +192,9 @@ if systemctl is-active --quiet server-sldns; then
 else
     print_error "SlowDNS service failed to start"
     
-    # Try direct start with MTU 1800
+    # Try direct start with MTU 2048
     pkill sldns-server 2>/dev/null
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
+    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 2048 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
     sleep 2
     
     if pgrep -x "sldns-server" > /dev/null; then
@@ -233,6 +223,6 @@ echo ""
 echo "Server IP: $SERVER_IP"
 echo "SSH Port: $SSHD_PORT"
 echo "SlowDNS Port: $SLOWDNS_PORT"
-echo "MTU: 1800"
+echo "MTU: 2048"
 echo ""
 echo "Note: SlowDNS is running on port $SLOWDNS_PORT"
