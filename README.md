@@ -10,3 +10,12 @@ apt-get update && apt-get install -y sudo && sudo bash -c "$(curl -fsSL https://
 
 
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/edns-proxy.sh)"
+
+
+
+ednschek by Alien tz use termux 
+
+
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/ednscheck.sh)"
+
+
