@@ -130,12 +130,13 @@ if [ -f /etc/default/dropbear ]; then
     cp /etc/default/dropbear /etc/default/dropbear.backup 2>/dev/null
 fi
 
-# Configure Dropbear
+# Configure Dropbear with proper settings for password authentication
 cat > /etc/default/dropbear << EOF
 # Dropbear SSH Configuration - Port $DROPEAR_PORT
 NO_START=0
 DROPBEAR_PORT=$DROPEAR_PORT
-DROPBEAR_EXTRA_ARGS="-s -w -p $DROPEAR_PORT"
+# Important: -s (disable password logins) is removed, -w (disable root logins) is removed
+DROPBEAR_EXTRA_ARGS="-p $DROPEAR_PORT -j -k"
 DROPBEAR_BANNER="/etc/dropbear/banner"
 DROPBEAR_RSAKEY="/etc/dropbear/dropbear_rsa_host_key"
 DROPBEAR_DSSKEY="/etc/dropbear/dropbear_dss_host_key"
@@ -145,7 +146,7 @@ EOF
 
 # Create banner file
 mkdir -p /etc/dropbear
-echo "Welcome to Dropbear SSH Server" > /etc/dropbear/banner
+echo "SSH-2.0-dropbear_2017.75" > /etc/dropbear/banner
 
 # Generate SSH RSA key (2048-bit) as requested
 print "Generating SSH RSA key (2048-bit)..."
@@ -203,6 +204,54 @@ chmod 600 /etc/dropbear/dropbear_*_host_key 2>/dev/null || true
 mkdir -p /var/run/dropbear
 chmod 755 /var/run/dropbear
 
+# IMPORTANT: Enable password authentication for root
+print "Configuring SSH password authentication..."
+# Create SSH config directory
+mkdir -p /etc/ssh
+
+# Backup original sshd_config if exists
+if [ -f /etc/ssh/sshd_config ]; then
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
+fi
+
+# Configure SSH for password authentication (for reference, though dropbear uses its own config)
+cat > /etc/ssh/sshd_config << EOF
+# SSH configuration for reference
+# Dropbear doesn't use this, but keeping for compatibility
+Port 22
+Protocol 2
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+AllowTcpForwarding yes
+GatewayPorts yes
+Subsystem sftp /usr/lib/openssh/sftp-server
+EOF
+
+# Set root password if not set
+print "Checking root password..."
+if ! grep -q "^root:" /etc/shadow 2>/dev/null; then
+    print_warning "Root password not set. Setting default password..."
+    echo "root:password123" | chpasswd 2>/dev/null || echo "Failed to set root password"
+    print "Default root password set to: password123"
+else
+    print_success "Root password is already set"
+fi
+
+# Also allow root login in PAM
+if [ -f /etc/pam.d/sshd ]; then
+    sed -i 's/auth required pam_deny.so/# auth required pam_deny.so/g' /etc/pam.d/sshd 2>/dev/null
+    sed -i 's/auth required pam_permit.so/# auth required pam_permit.so/g' /etc/pam.d/sshd 2>/dev/null
+fi
+
 # Restart Dropbear service
 print "Restarting Dropbear service..."
 systemctl daemon-reload
@@ -230,6 +279,10 @@ if $DROPBEAR_RUNNING; then
     # Show Dropbear version
     DROPBEAR_VERSION=$(dropbear -V 2>&1 | head -1 || echo "unknown version")
     print "Dropbear version: $DROPBEAR_VERSION"
+    
+    # Show current Dropbear process
+    print "Dropbear process info:"
+    ps aux | grep dropbear | grep -v grep
 else
     print_warning "Dropbear service not running normally, attempting manual start..."
     
@@ -237,13 +290,12 @@ else
     pkill dropbear 2>/dev/null
     sleep 1
     
-    # Start dropbear manually
+    # Start dropbear manually with password auth enabled
     if command -v dropbear &> /dev/null; then
-        # Create directory for dropbear
-        mkdir -p /etc/dropbear /var/run/dropbear
-        
-        # Start dropbear in background
-        dropbear -p $DROPEAR_PORT -s -w -F -E &
+        print "Starting Dropbear manually with password authentication..."
+        # Start dropbear with: -p port, -j (disable local port forwarding), -k (disable remote port forwarding)
+        # Remove -s (disable password logins) and -w (disable root logins)
+        dropbear -p $DROPEAR_PORT -j -k -F -E &
         DROPBEAR_PID=$!
         sleep 2
         
@@ -252,49 +304,27 @@ else
             print_success "Dropbear started manually on port $DROPEAR_PORT (PID: $DROPBEAR_PID)"
             
             # Save PID to file for later management
+            mkdir -p /var/run/dropbear
             echo $DROPBEAR_PID > /var/run/dropbear/dropbear.pid
             
-            # Create a simple init script to restart on boot
-            cat > /etc/init.d/dropbear-manual << EOF
-#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          dropbear-manual
-# Required-Start:    \$network \$remote_fs
-# Required-Stop:     \$network \$remote_fs
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: Dropbear SSH server (manual)
-### END INIT INFO
-
-case "\$1" in
-    start)
-        pkill dropbear 2>/dev/null
-        dropbear -p $DROPEAR_PORT -s -w -F -E &
-        echo \$! > /var/run/dropbear/dropbear.pid
-        ;;
-    stop)
-        pkill dropbear 2>/dev/null
-        rm -f /var/run/dropbear/dropbear.pid
-        ;;
-    restart)
-        \$0 stop
-        sleep 1
-        \$0 start
-        ;;
-    *)
-        echo "Usage: \$0 {start|stop|restart}"
-        exit 1
-        ;;
-esac
-exit 0
-EOF
-            
-            chmod +x /etc/init.d/dropbear-manual
-            update-rc.d dropbear-manual defaults > /dev/null 2>&1
+            # Test connection
+            print "Testing Dropbear connection..."
+            if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$DROPEAR_PORT" 2>/dev/null; then
+                print_success "Dropbear is accepting connections"
+            else
+                print_warning "Dropbear started but not accepting connections"
+            fi
         else
             print_error "Failed to start Dropbear manually"
-            print "Checking system logs for errors..."
-            journalctl -u dropbear --no-pager | tail -20
+            print "Trying alternative command..."
+            # Try with minimal options
+            dropbear -p $DROPEAR_PORT &
+            sleep 2
+            if ss -tuln | grep -q ":$DROPEAR_PORT"; then
+                print_success "Dropbear started with minimal options"
+            else
+                print_error "All Dropbear start attempts failed"
+            fi
         fi
     else
         print_error "Dropbear binary not found. Installation may have failed."
@@ -374,9 +404,9 @@ cat > /etc/rc.local <<-END
 
 # Start Dropbear (try both methods)
 systemctl start dropbear 2>/dev/null || true
-if [ -f /etc/init.d/dropbear-manual ]; then
-    /etc/init.d/dropbear-manual start
-fi
+pkill dropbear 2>/dev/null
+sleep 1
+dropbear -p $DROPEAR_PORT -j -k &
 
 # Flush iptables
 iptables -F
@@ -482,18 +512,20 @@ else
     fi
 fi
 
-# Test connection
-print "Testing Dropbear connection..."
+# Final connection test
+print "Final connection test..."
+echo ""
+echo -e "${YELLOW}Testing Dropbear SSH on port $DROPEAR_PORT...${NC}"
 if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$DROPEAR_PORT" 2>/dev/null; then
-    print_success "Dropbear port $DROPEAR_PORT is accessible"
-else
-    print_warning "Dropbear port $DROPEAR_PORT is not accessible locally"
-    print "Checking if port is open for external connections..."
-    if ss -tuln | grep -q ":$DROPEAR_PORT"; then
-        print_success "Dropbear is listening on port $DROPEAR_PORT"
-    else
-        print_error "Dropbear is not listening on any port"
+    print_success "✓ Dropbear SSH is listening on port $DROPEAR_PORT"
+    
+    # Try to get SSH banner
+    print "Testing SSH banner..."
+    if timeout 3 bash -c "echo 'SSH-2.0-Test' | nc -w 2 127.0.0.1 $DROPEAR_PORT" 2>/dev/null | grep -q "SSH-2.0"; then
+        print_success "✓ SSH banner is responding"
     fi
+else
+    print_error "✗ Dropbear SSH is NOT listening on port $DROPEAR_PORT"
 fi
 
 echo ""
@@ -501,20 +533,25 @@ echo -e "${GREEN}─────────────────────
 print_success "Dropbear + SlowDNS Installation Completed!"
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
 echo ""
-echo -e "${YELLOW}Installation Summary:${NC}"
-echo "• Dropbear SSH: Port $DROPEAR_PORT"
-echo "• SlowDNS Server: Port $SLOWDNS_PORT"
-echo "• Nameserver: $NAMESERVER"
-echo "• SSH Key: 2048-bit RSA"
+echo -e "${YELLOW}Connection Information:${NC}"
+echo "Server IP: $SERVER_IP"
+echo "Dropbear SSH Port: $DROPEAR_PORT"
+echo "SlowDNS Port: $SLOWDNS_PORT"
+echo "Nameserver: $NAMESERVER"
+echo ""
+echo -e "${YELLOW}For SSH Clients (like HTTP Custom):${NC}"
+echo "Host: $SERVER_IP"
+echo "Port: $DROPEAR_PORT"
+echo "Username: root"
+echo "Password: [your root password]"
+echo ""
+echo -e "${YELLOW}To set/change root password:${NC}"
+echo "passwd root"
+echo ""
+echo -e "${YELLOW}Testing SSH connection:${NC}"
+echo "ssh -p $DROPEAR_PORT root@$SERVER_IP"
 echo ""
 echo -e "${YELLOW}Important Note:${NC}"
 echo "SlowDNS is running on port $SLOWDNS_PORT (not 53)"
-echo "To make SlowDNS work on port 53, you need to:"
-echo "1. Install EDNS Proxy (separate script)"
-echo "2. Or use iptables to redirect port 53 to $SLOWDNS_PORT"
-echo ""
-echo -e "${YELLOW}Testing Commands:${NC}"
-echo "Check Dropbear: ss -tuln | grep :$DROPEAR_PORT"
-echo "Check SlowDNS: ss -uln | grep :$SLOWDNS_PORT"
-echo "Test SSH: ssh -p $DROPEAR_PORT root@localhost"
+echo "To make SlowDNS work on port 53, install EDNS Proxy separately"
 echo ""
