@@ -11,7 +11,7 @@ NC='\033[0m'
 
 # Configuration
 EXTERNAL_EDNS_SIZE=512
-INTERNAL_EDNS_SIZE=2048  # Changed from 1232 to 2048
+INTERNAL_EDNS_SIZE=1232  # Changed back to 1232
 EDNS_PROXY_PORT=53
 SLOWDNS_PORT=5300
 
@@ -151,7 +151,7 @@ else
     print_success "Python3 already installed"
 fi
 
-# Create EDNS Proxy Python script (converts 512 to 2048)
+# Create EDNS Proxy Python script (converts 512 to 1232)
 print "Creating EDNS Proxy Python script..."
 cat > /usr/local/bin/edns-proxy.py << 'EOF'
 #!/usr/bin/env python3
@@ -159,7 +159,7 @@ cat > /usr/local/bin/edns-proxy.py << 'EOF'
 EDNS Proxy for SlowDNS (smart parser)
 - Listens on UDP :53 (public)
 - Forwards to 127.0.0.1:5300 (SlowDNS server) with bigger EDNS size
-- Outside sees 512, inside server sees 2048
+- Outside sees 512, inside server sees 1232
 """
 
 import socket
@@ -174,9 +174,9 @@ LISTEN_PORT = 53
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = 5300
 
-# EDNS sizes - CHANGED INTERNAL SIZE TO 2048
+# EDNS sizes
 EXTERNAL_EDNS_SIZE = 512   # what we show to clients
-INTERNAL_EDNS_SIZE = 2048  # what we tell SlowDNS internally - CHANGED FROM 1232 TO 2048
+INTERNAL_EDNS_SIZE = 1232  # what we tell SlowDNS internally
 
 def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
     """
@@ -435,7 +435,7 @@ echo " dig @127.0.0.1 google.com  # Manual DNS test"
 echo ""
 echo -e "${YELLOW}EDNS Configuration:${NC}"
 echo " External MTU: 512 (what clients see)"
-echo " Internal MTU: 2048 (what SlowDNS receives) - UPDATED"
+echo " Internal MTU: 1232 (what SlowDNS receives)"
 echo ""
 echo -e "${YELLOW}If port 53 is still in use, try:${NC}"
 echo " sudo systemctl stop systemd-resolved"
