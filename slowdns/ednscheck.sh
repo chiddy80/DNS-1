@@ -60,6 +60,13 @@ check_dependencies() {
         echo -e "${GREEN}[✓]${NC} ping installed"
     fi
     
+    # Check for dig
+    if ! command -v dig &> /dev/null; then
+        echo -e "${YELLOW}[!]${NC} dig not found. Installing..."
+        pkg install dnsutils -y > /dev/null 2>&1
+        echo -e "${GREEN}[✓]${NC} dig installed"
+    fi
+    
     echo -e "${GREEN}[✓]${NC} All dependencies are installed"
 }
 
@@ -253,7 +260,7 @@ show_menu() {
     echo -e "${GREEN}1.${NC} Run extended MTU test (512 to 4096)"
     echo -e "${GREEN}2.${NC} Run quick test (512, 1024, 1232, 1452, 2048, 4096)"
     echo -e "${GREEN}3.${NC} Test specific MTU size"
-    echo -e "${GREEN}4.${NC} Show current network info"
+    echo -e "${GREEN}4.${NC} Show current network info & Test DNS"
     echo -e "${GREEN}5.${NC} Run complete scan (all MTU from 512 to 4096)"
     echo -e "${GREEN}6.${NC} Exit"
     echo ""
@@ -480,7 +487,7 @@ show_recommendation() {
     echo "  EDNS Proxy: EXTERNAL_EDNS_SIZE = 512"
 }
 
-# Show network info
+# Show network info with DNS testing - SIMPLE VERSION LIKE YOUR PICTURE
 show_network_info() {
     echo ""
     echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
@@ -505,6 +512,163 @@ show_network_info() {
     fi
     
     echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${WHITE}    D N S   T E S T I N G${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Ask for DNS server
+    echo -e "${YELLOW}Enter DNS server IP address to test:${NC}"
+    read -p "DNS Server: " dns_server
+    
+    # Validate input
+    if [ -z "$dns_server" ]; then
+        echo -e "${RED}No DNS server entered! Using default 8.8.8.8${NC}"
+        dns_server="8.8.8.8"
+    fi
+    
+    # Ask for domain
+    echo ""
+    echo -e "${YELLOW}Enter domain to query:${NC}"
+    read -p "Domain: " domain
+    
+    # Validate input
+    if [ -z "$domain" ]; then
+        echo -e "${RED}No domain entered! Using default google.com${NC}"
+        domain="google.com"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${WHITE}    R U N N I N G :  dig @${dns_server} ${domain}${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Run the dig command and display output EXACTLY like in your picture
+    echo -e "${WHITE}Command:${NC} dig @${dns_server} ${domain}"
+    echo ""
+    
+    # Check if DNS server is reachable
+    echo -ne "${BLUE}[*]${NC} Testing DNS server connection: "
+    if timeout 2 ping -c 1 $dns_server &> /dev/null; then
+        echo -e "${GREEN}✓ ONLINE${NC}"
+    else
+        echo -e "${YELLOW}⚠ UNREACHABLE (may still work)${NC}"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${WHITE}    D I G   O U T P U T${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Run dig command and display raw output
+    dig @$dns_server $domain
+    
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${WHITE}    S U M M A R Y${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Get summary information
+    local dig_summary=$(dig @$dns_server $domain +noall +stats 2>/dev/null)
+    
+    # Extract query time
+    local query_time=$(echo "$dig_summary" | grep "Query time:" | awk '{print $4}')
+    if [ -n "$query_time" ]; then
+        echo -e "${BLUE}Query Time:${NC} ${query_time} msec"
+        
+        # Performance indicator
+        if [ "$query_time" -lt 50 ]; then
+            echo -e "  ${GREEN}✓ Excellent speed${NC}"
+        elif [ "$query_time" -lt 100 ]; then
+            echo -e "  ${GREEN}✓ Good speed${NC}"
+        elif [ "$query_time" -lt 200 ]; then
+            echo -e "  ${YELLOW}⚠ Average speed${NC}"
+        elif [ "$query_time" -lt 500 ]; then
+            echo -e "  ${YELLOW}⚠ Slow speed${NC}"
+        else
+            echo -e "  ${RED}✗ Very slow${NC}"
+        fi
+    fi
+    
+    # Get server info
+    local server_info=$(echo "$dig_summary" | grep "SERVER:")
+    if [ -n "$server_info" ]; then
+        echo -e "${BLUE}Server:${NC} ${server_info#*: }"
+    fi
+    
+    # Get WHEN info
+    local when_info=$(echo "$dig_summary" | grep "WHEN:")
+    if [ -n "$when_info" ]; then
+        echo -e "${BLUE}Time:${NC} ${when_info#*: }"
+    fi
+    
+    # Get message size
+    local msg_size=$(echo "$dig_summary" | grep "MSG SIZE")
+    if [ -n "$msg_size" ]; then
+        echo -e "${BLUE}Message Size:${NC} ${msg_size#*: }"
+    fi
+    
+    # Get number of IPs returned
+    local ip_count=$(dig @$dns_server $domain +short 2>/dev/null | wc -l)
+    if [ "$ip_count" -gt 0 ]; then
+        echo -e "${BLUE}IPs Found:${NC} ${GREEN}${ip_count}${NC}"
+        
+        # Show first few IPs
+        if [ "$ip_count" -le 6 ]; then
+            echo -e "${BLUE}IP Addresses:${NC}"
+            dig @$dns_server $domain +short 2>/dev/null | while read ip; do
+                echo -e "  ${GREEN}•${NC} $ip"
+            done
+        else
+            echo -e "${BLUE}IP Addresses (first 3):${NC}"
+            dig @$dns_server $domain +short 2>/dev/null | head -3 | while read ip; do
+                echo -e "  ${GREEN}•${NC} $ip"
+            done
+            echo -e "  ${GREEN}•${NC} ... and $((ip_count - 3)) more"
+        fi
+    else
+        echo -e "${RED}No IP addresses found!${NC}"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${WHITE}    T E S T   C O M P L E T E D${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Test other popular DNS servers for comparison
+    echo -e "${YELLOW}Quick comparison with other DNS servers:${NC}"
+    echo ""
+    
+    declare -A dns_servers
+    dns_servers["Google DNS"]="8.8.8.8"
+    dns_servers["Cloudflare"]="1.1.1.1"
+    dns_servers["Quad9"]="9.9.9.9"
+    
+    for name in "${!dns_servers[@]}"; do
+        local test_server="${dns_servers[$name]}"
+        if [ "$test_server" != "$dns_server" ]; then
+            echo -ne "  ${BLUE}${name}${NC} (${test_server}): "
+            local test_time=$(timeout 3 dig @$test_server $domain +stats 2>/dev/null | grep "Query time:" | awk '{print $4}' 2>/dev/null)
+            if [ -n "$test_time" ]; then
+                if [ "$test_time" -lt "$query_time" ]; then
+                    echo -e "${GREEN}${test_time} ms (faster)${NC}"
+                elif [ "$test_time" -gt "$query_time" ]; then
+                    echo -e "${YELLOW}${test_time} ms (slower)${NC}"
+                else
+                    echo -e "${WHITE}${test_time} ms${NC}"
+                fi
+            else
+                echo -e "${RED}timeout${NC}"
+            fi
+        fi
+    done
+    
+    echo ""
+    echo -e "${WHITE}Note:${NC} Lower query times are better. 1-100ms is excellent."
 }
 
 # Main execution
