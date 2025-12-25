@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,7 +11,7 @@ NC='\033[0m'
 
 # Configuration
 EXTERNAL_EDNS_SIZE=512
-INTERNAL_EDNS_SIZE=1452
+INTERNAL_EDNS_SIZE=2048  # Changed from 1232 to 2048
 EDNS_PROXY_PORT=53
 SLOWDNS_PORT=5300
 
@@ -21,7 +20,7 @@ print_title() {
     clear
     echo ""
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${WHITE} E D N S   P R O X Y   I N S T A L L A T I O N${NC}"
+    echo -e "${WHITE} E D N S P R O X Y I N S T A L L A T I O N${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
     echo -e "${YELLOW} Bypass MTU 512 for SlowDNS (512 → $INTERNAL_EDNS_SIZE)${NC}"
     echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
@@ -46,7 +45,7 @@ print_warning() {
 
 # Check root
 check_root() {
-    if [ "$EUID" -ne 0 ]; then 
+    if [ "$EUID" -ne 0 ]; then
         echo -e "${RED}Please run as root: sudo bash $0${NC}"
         exit 1
     fi
@@ -85,7 +84,6 @@ safe_stop_dns() {
     # 3. Check what's on port 53 without killing
     print "Checking what's using port 53..."
     local port_users=$(ss -tulpn | grep ':53 ' | head -5)
-    
     if [ -n "$port_users" ]; then
         print_warning "Port 53 is currently in use by:"
         echo "$port_users" | while read line; do
@@ -153,7 +151,7 @@ else
     print_success "Python3 already installed"
 fi
 
-# Create EDNS Proxy Python script (converts 512 to 1452)
+# Create EDNS Proxy Python script (converts 512 to 2048)
 print "Creating EDNS Proxy Python script..."
 cat > /usr/local/bin/edns-proxy.py << 'EOF'
 #!/usr/bin/env python3
@@ -161,7 +159,7 @@ cat > /usr/local/bin/edns-proxy.py << 'EOF'
 EDNS Proxy for SlowDNS (smart parser)
 - Listens on UDP :53 (public)
 - Forwards to 127.0.0.1:5300 (SlowDNS server) with bigger EDNS size
-- Outside sees 512, inside server sees 1452
+- Outside sees 512, inside server sees 2048
 """
 
 import socket
@@ -176,10 +174,9 @@ LISTEN_PORT = 53
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = 5300
 
-# EDNS sizes
-EXTERNAL_EDNS_SIZE = 512    # what we show to clients
-INTERNAL_EDNS_SIZE = 1452   # what we tell SlowDNS internally
-
+# EDNS sizes - CHANGED INTERNAL SIZE TO 2048
+EXTERNAL_EDNS_SIZE = 512   # what we show to clients
+INTERNAL_EDNS_SIZE = 2048  # what we tell SlowDNS internally - CHANGED FROM 1232 TO 2048
 
 def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
     """
@@ -188,15 +185,15 @@ def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
     """
     if len(data) < 12:
         return data
-
+    
     try:
         # Header: ID(2), FLAGS(2), QDCOUNT(2), ANCOUNT(2), NSCOUNT(2), ARCOUNT(2)
         qdcount, ancount, nscount, arcount = struct.unpack("!HHHH", data[4:12])
     except struct.error:
         return data
-
+    
     offset = 12
-
+    
     def skip_name(buf, off):
         """Skip DNS name (supporting compression)."""
         while True:
@@ -206,22 +203,21 @@ def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
             off += 1
             if l == 0:
                 break
-            if l & 0xC0 == 0xC0:
-                # compression pointer, one more byte
+            if l & 0xC0 == 0xC0:  # compression pointer, one more byte
                 if off >= len(buf):
                     return len(buf)
                 off += 1
                 break
             off += l
         return off
-
+    
     # Skip Questions
     for _ in range(qdcount):
         offset = skip_name(data, offset)
         if offset + 4 > len(data):
             return data
         offset += 4  # QTYPE + QCLASS
-
+    
     def skip_rrs(count, buf, off):
         """Skip Resource Records (Answer + Authority)."""
         for _ in range(count):
@@ -235,11 +231,11 @@ def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
                 return len(buf)
             off += rdlen
         return off
-
+    
     # Skip Answer + Authority
     offset = skip_rrs(ancount, data, offset)
     offset = skip_rrs(nscount, data, offset)
-
+    
     # Additional section → EDNS OPT RR is here
     new_data = bytearray(data)
     for _ in range(arcount):
@@ -247,20 +243,19 @@ def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
         offset = skip_name(data, offset)
         if offset + 10 > len(data):
             return data
+        
         rtype = struct.unpack("!H", data[offset:offset+2])[0]
-
         if rtype == 41:  # OPT RR (EDNS)
             # UDP payload size is 2 bytes after TYPE
             size_bytes = struct.pack("!H", new_size)
             new_data[offset+2:offset+4] = size_bytes
             return bytes(new_data)
-
+        
         # Skip CLASS(2) + TTL(4) + RDLEN(2) + RDATA
         _, _, rdlen = struct.unpack("!H I H", data[offset+2:offset+10])
         offset += 10 + rdlen
-
+    
     return data
-
 
 def handle_request(server_sock: socket.socket, data: bytes, client_addr):
     """
@@ -271,14 +266,12 @@ def handle_request(server_sock: socket.socket, data: bytes, client_addr):
     """
     upstream_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     upstream_sock.settimeout(5.0)
-
+    
     try:
         upstream_data = patch_edns_udp_size(data, INTERNAL_EDNS_SIZE)
         upstream_sock.sendto(upstream_data, (UPSTREAM_HOST, UPSTREAM_PORT))
-
         resp, _ = upstream_sock.recvfrom(4096)
         resp_patched = patch_edns_udp_size(resp, EXTERNAL_EDNS_SIZE)
-
         server_sock.sendto(resp_patched, client_addr)
     except socket.timeout:
         # client will resend, no need to kill proxy
@@ -289,14 +282,14 @@ def handle_request(server_sock: socket.socket, data: bytes, client_addr):
     finally:
         upstream_sock.close()
 
-
 def main():
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_sock.bind((LISTEN_HOST, LISTEN_PORT))
+    
     print(f"[EDNS Proxy] Listening on {LISTEN_HOST}:{LISTEN_PORT}, "
           f"upstream {UPSTREAM_HOST}:{UPSTREAM_PORT}, "
           f"external EDNS={EXTERNAL_EDNS_SIZE}, internal EDNS={INTERNAL_EDNS_SIZE}")
-
+    
     while True:
         data, client_addr = server_sock.recvfrom(4096)
         t = threading.Thread(
@@ -305,7 +298,6 @@ def main():
             daemon=True,
         )
         t.start()
-
 
 if __name__ == "__main__":
     main()
@@ -336,6 +328,7 @@ StandardError=append:/var/log/edns-proxy.error
 [Install]
 WantedBy=multi-user.target
 EOF
+
 print_success "EDNS Proxy service created"
 
 # SAFELY stop DNS services
@@ -347,7 +340,6 @@ iptables -F 2>/dev/null
 iptables -t nat -F 2>/dev/null
 iptables -A INPUT -p udp --dport $EDNS_PROXY_PORT -j ACCEPT
 iptables -A INPUT -p tcp --dport $EDNS_PROXY_PORT -j ACCEPT
-
 # Redirect standard DNS to our proxy
 iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
 iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 53
@@ -363,7 +355,6 @@ sleep 3
 # Test EDNS Proxy
 print "Testing EDNS Proxy..."
 sleep 2
-
 print "Testing port $EDNS_PROXY_PORT..."
 if ss -ulpn | grep -q ":$EDNS_PROXY_PORT"; then
     print_success "EDNS Proxy listening on port $EDNS_PROXY_PORT"
@@ -406,16 +397,16 @@ cat > /usr/local/bin/edns-status << 'EOF'
 echo "=== EDNS Proxy Status ==="
 echo ""
 echo "Service Status:"
-systemctl status edns-proxy --no-pager | grep "Active:" | sed 's/^/  /'
+systemctl status edns-proxy --no-pager | grep "Active:" | sed 's/^/ /'
 echo ""
 echo "Port Status:"
-echo "  Port 53 (EDNS Proxy):"
-ss -ulpn | grep ":53" | sed 's/^/    /'
-echo "  Port 5300 (SlowDNS):"
-ss -ulpn | grep ":5300" | sed 's/^/    /'
+echo " Port 53 (EDNS Proxy):"
+ss -ulpn | grep ":53" | sed 's/^/ /'
+echo " Port 5300 (SlowDNS):"
+ss -ulpn | grep ":5300" | sed 's/^/ /'
 echo ""
 echo "Recent Logs:"
-journalctl -u edns-proxy.service -n 5 --no-pager 2>/dev/null | tail -5 | sed 's/^/  /'
+journalctl -u edns-proxy.service -n 5 --no-pager 2>/dev/null | tail -5 | sed 's/^/ /'
 EOF
 
 chmod +x /usr/local/bin/edns-status
@@ -437,14 +428,17 @@ echo -e "${GREEN}─────────────────────
 print_success "EDNS Proxy Installation Completed!"
 echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
 echo ""
-
 echo -e "${YELLOW}Quick Test Commands:${NC}"
-echo "  edns-status          # Check EDNS Proxy status"
-echo "  test-edns            # Test DNS resolution"
-echo "  dig @127.0.0.1 google.com  # Manual DNS test"
+echo " edns-status    # Check EDNS Proxy status"
+echo " test-edns     # Test DNS resolution"
+echo " dig @127.0.0.1 google.com  # Manual DNS test"
+echo ""
+echo -e "${YELLOW}EDNS Configuration:${NC}"
+echo " External MTU: 512 (what clients see)"
+echo " Internal MTU: 2048 (what SlowDNS receives) - UPDATED"
 echo ""
 echo -e "${YELLOW}If port 53 is still in use, try:${NC}"
-echo "  sudo systemctl stop systemd-resolved"
-echo "  sudo fuser -k 53/udp"
-echo "  sudo systemctl restart edns-proxy"
+echo " sudo systemctl stop systemd-resolved"
+echo " sudo fuser -k 53/udp"
+echo " sudo systemctl restart edns-proxy"
 echo ""
