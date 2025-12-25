@@ -8,9 +8,10 @@ NC='\033[0m'
 
 # Configuration
 EXTERNAL_EDNS_SIZE=512
-INTERNAL_EDNS_SIZE=2048  # Changed from 1800 to 2048
+INTERNAL_EDNS_SIZE=1800
 EDNS_PROXY_PORT=53
 SLOWDNS_PORT=5300
+DROPBEAR_PORT=222  # Added Dropbear port
 
 # Functions
 print_success() {
@@ -49,6 +50,22 @@ check_slowdns() {
     fi
 }
 
+# Check if Dropbear is running on port 222
+check_dropbear() {
+    print_warning "Checking if Dropbear is running on port $DROPBEAR_PORT..."
+    if ss -tlnp | grep -q ":$DROPBEAR_PORT"; then
+        print_success "Dropbear found running on port $DROPBEAR_PORT"
+        return 0
+    else
+        print_warning "Dropbear not found on port $DROPBEAR_PORT"
+        echo ""
+        echo -e "${YELLOW}Note: For SlowDNS to work properly, Dropbear should be running on port $DROPBEAR_PORT.${NC}"
+        echo -e "${YELLOW}If Dropbear is not installed, please install it first.${NC}"
+        echo ""
+        return 1
+    fi
+}
+
 # SAFE: Stop DNS services without killing the script
 safe_stop_dns() {
     print_warning "Stopping existing DNS services on port 53..."
@@ -62,6 +79,7 @@ safe_stop_dns() {
 # Check prerequisites
 check_root
 check_slowdns
+check_dropbear
 
 # Install Python3 if not present
 print_warning "Checking for Python3..."
@@ -87,7 +105,7 @@ LISTEN_PORT = 53
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = 5300
 EXTERNAL_EDNS_SIZE = 512
-INTERNAL_EDNS_SIZE = 2048  # Changed from 1800 to 2048
+INTERNAL_EDNS_SIZE = 1800
 
 def patch_edns_udp_size(data: bytes, new_size: int) -> bytes:
     if len(data) < 12:
@@ -231,5 +249,20 @@ systemctl stop systemd-resolved
 fuser -k 53/udp
 systemctl restart edns-proxy
 
+# Display configuration information
 echo ""
 print_success "EDNS Proxy Installation Completed"
+echo ""
+echo "Configuration Summary:"
+echo "======================"
+echo "EDNS Proxy Port: $EDNS_PROXY_PORT"
+echo "SlowDNS Port: $SLOWDNS_PORT"
+echo "Dropbear Port: $DROPBEAR_PORT"
+echo "External EDNS Size: $EXTERNAL_EDNS_SIZE"
+echo "Internal EDNS Size: $INTERNAL_EDNS_SIZE"
+echo ""
+echo "Note: This EDNS Proxy is configured to work with:"
+echo "  - SlowDNS running on port $SLOWDNS_PORT"
+echo "  - Dropbear SSH server on port $DROPBEAR_PORT"
+echo ""
+echo "Make sure your SlowDNS is configured to forward to Dropbear on port $DROPBEAR_PORT"
